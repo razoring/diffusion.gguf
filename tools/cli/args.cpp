@@ -1,0 +1,187 @@
+#include "args.h"
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string_view>
+
+namespace diffusion {
+
+void print_cli_help() {
+    std::cout << "Usage: diffusion-cli -m <model.gguf> [options]\n\n"
+              << "General Options:\n"
+              << "  -m, --model PATH         Path to GGUF model file (required)\n"
+              << "  -p, --prompt TEXT        Input prompt text\n"
+              << "  -f, --file PATH          Read prompt from file\n"
+              << "  -n, --predict N          Number of tokens to generate (default: 128)\n"
+              << "  -c, --ctx-size N         Context size (default: 2048)\n"
+              << "  -t, --threads N          Number of CPU threads (default: 4)\n"
+              << "  -ngl, --n-gpu-layers N   Number of layers to offload to GPU (default: 0)\n"
+              << "  -fa, --flash-attn        Enable Flash Attention\n"
+              << "  -s, --seed N             RNG seed (default: 42)\n\n"
+              << "Sampling Options:\n"
+              << "  --temp FLOAT             Temperature (default: 0.8, 0 = greedy)\n"
+              << "  --top-k N                Top-k sampling (default: 40)\n"
+              << "  --top-p FLOAT            Top-p sampling (default: 0.95)\n"
+              << "  --min-p FLOAT            Min-p sampling (default: 0.05)\n"
+              << "  --repeat-penalty FLOAT   Repeat penalty (default: 1.0)\n"
+              << "  --repeat-last-n N        Repeat last n tokens (default: 64)\n"
+              << "  --mirostat N             Mirostat (0=disabled, 1=v1, 2=v2)\n\n"
+              << "Diffusion / Jacobi Options:\n"
+              << "  --mode MODE              Decoding mode: block (default), whole, ar\n"
+              << "  --block N                Jacobi block size (default: 32)\n"
+              << "  --whole-max N            Max canvas size for whole mode (default: 512)\n"
+              << "  --init STRAT             Canvas init strategy: ngram (default), random, pad\n"
+              << "  --ngram-n N              N-gram context length for init guesser (default: 3)\n"
+              << "  --ngram-pool N           N-gram pool max capacity (default: 4096)\n"
+              << "  --max-iters N            Maximum iterations cap (default: n_predict + 8)\n"
+              << "  --rng-mode MODE          positional (default), llama-compat\n\n"
+              << "Display & Output Options:\n"
+              << "  --render STYLE           auto (default), live, progress, final\n"
+              << "  --render-fps N           Live terminal render framerate (default: 30)\n"
+              << "  --no-color               Disable ANSI color codes\n"
+              << "  --stats                  Print JSON timing and token stats to stderr\n"
+              << "  --tokens-out PATH        Dump generated token IDs to file (for test oracle)\n"
+              << "  -cnv, --conversation     Run interactive chat REPL mode\n"
+              << "  -sys, --system-prompt S  System prompt for chat mode\n"
+              << "  --chat-template JINJA    Override model Jinja chat template\n"
+              << "  -r, --reverse-prompt S   Stop string (can be specified multiple times)\n"
+              << "  -v, --version            Show version\n"
+              << "  -h, --help               Show this help message\n";
+}
+
+
+CliArgs parse_cli_args(int argc, char** argv) {
+    CliArgs args;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+
+        if (arg == "-v" || arg == "--version") {
+            args.show_version = true;
+            return args;
+        }
+        if (arg == "-h" || arg == "--help") {
+            args.show_help = true;
+            return args;
+        }
+
+        auto next_str = [&](const char* opt_name) -> std::string {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: option " << opt_name << " requires an argument\n";
+                exit(1);
+            }
+            return argv[++i];
+        };
+
+        auto next_int = [&](const char* opt_name) -> int {
+            return std::stoi(next_str(opt_name));
+        };
+
+        auto next_float = [&](const char* opt_name) -> float {
+            return std::stof(next_str(opt_name));
+        };
+
+        if (arg == "-m" || arg == "--model") {
+            args.backend.model_path = next_str("-m/--model");
+        } else if (arg == "-p" || arg == "--prompt") {
+            args.prompt = next_str("-p/--prompt");
+        } else if (arg == "-f" || arg == "--file") {
+            args.prompt_file = next_str("-f/--file");
+        } else if (arg == "-n" || arg == "--predict") {
+            args.params.n_predict = next_int("-n/--predict");
+        } else if (arg == "-c" || arg == "--ctx-size") {
+            args.backend.n_ctx = next_int("-c/--ctx-size");
+        } else if (arg == "-t" || arg == "--threads") {
+            args.backend.n_threads = next_int("-t/--threads");
+        } else if (arg == "-ngl" || arg == "--n-gpu-layers") {
+            args.backend.n_gpu_layers = next_int("-ngl/--n-gpu-layers");
+        } else if (arg == "-fa" || arg == "--flash-attn") {
+            args.backend.flash_attn = true;
+        } else if (arg == "-s" || arg == "--seed") {
+            args.params.sampling.seed = static_cast<uint32_t>(next_int("-s/--seed"));
+        } else if (arg == "--temp") {
+            args.params.sampling.temp = next_float("--temp");
+        } else if (arg == "--top-k") {
+            args.params.sampling.top_k = next_int("--top-k");
+        } else if (arg == "--top-p") {
+            args.params.sampling.top_p = next_float("--top-p");
+        } else if (arg == "--min-p") {
+            args.params.sampling.min_p = next_float("--min-p");
+        } else if (arg == "--repeat-penalty") {
+            args.params.sampling.repeat_penalty = next_float("--repeat-penalty");
+        } else if (arg == "--repeat-last-n") {
+            args.params.sampling.repeat_last_n = next_int("--repeat-last-n");
+        } else if (arg == "--presence-penalty") {
+            args.params.sampling.presence_penalty = next_float("--presence-penalty");
+        } else if (arg == "--frequency-penalty") {
+            args.params.sampling.frequency_penalty = next_float("--frequency-penalty");
+        } else if (arg == "--mirostat") {
+            args.params.sampling.mirostat = next_int("--mirostat");
+        } else if (arg == "--mode") {
+            std::string mode_str = next_str("--mode");
+            if (mode_str == "ar") args.params.mode = DecodeMode::AR;
+            else if (mode_str == "whole") args.params.mode = DecodeMode::WHOLE;
+            else args.params.mode = DecodeMode::BLOCK;
+        } else if (arg == "--block") {
+            args.params.block_size = next_int("--block");
+        } else if (arg == "--whole-max") {
+            args.params.whole_max = next_int("--whole-max");
+        } else if (arg == "--init") {
+            std::string s = next_str("--init");
+            if (s == "random") args.params.init_strategy = InitStrategy::RANDOM;
+            else if (s == "pad") args.params.init_strategy = InitStrategy::PAD;
+            else args.params.init_strategy = InitStrategy::NGRAM;
+        } else if (arg == "--ngram-n") {
+            args.params.ngram_n = next_int("--ngram-n");
+        } else if (arg == "--ngram-pool") {
+            args.params.ngram_pool_max = next_int("--ngram-pool");
+        } else if (arg == "--max-iters") {
+            args.params.max_iters = next_int("--max-iters");
+        } else if (arg == "--rng-mode") {
+            std::string s = next_str("--rng-mode");
+            if (s == "llama-compat") args.params.sampling.rng_mode = RngMode::LLAMA_COMPAT;
+            else args.params.sampling.rng_mode = RngMode::POSITIONAL;
+        } else if (arg == "--render") {
+            std::string r = next_str("--render");
+            if (r == "live") args.render_mode = RenderMode::LIVE;
+            else if (r == "progress") args.render_mode = RenderMode::PROGRESS;
+            else if (r == "final") args.render_mode = RenderMode::FINAL;
+            else args.render_mode = RenderMode::AUTO;
+        } else if (arg == "--render-fps") {
+            args.render_fps = next_int("--render-fps");
+        } else if (arg == "--no-color") {
+            args.no_color = true;
+        } else if (arg == "--stats") {
+            args.show_stats = true;
+        } else if (arg == "--tokens-out") {
+            args.tokens_out_file = next_str("--tokens-out");
+        } else if (arg == "-cnv" || arg == "--conversation") {
+            args.conversation = true;
+        } else if (arg == "-sys" || arg == "--system-prompt") {
+            args.system_prompt = next_str("-sys/--system-prompt");
+        } else if (arg == "--chat-template") {
+            args.custom_chat_template = next_str("--chat-template");
+        } else if (arg == "-r" || arg == "--reverse-prompt" || arg == "--stop") {
+            args.params.stop_strings.push_back(next_str("-r/--stop"));
+        } else {
+            std::cerr << "Unknown argument: " << arg << "\n";
+            exit(1);
+        }
+    }
+
+    if (!args.prompt_file.empty()) {
+        std::ifstream f(args.prompt_file);
+        if (f) {
+            std::ostringstream ss;
+            ss << f.rdbuf();
+            args.prompt = ss.str();
+        } else {
+            std::cerr << "Error: could not open prompt file: " << args.prompt_file << "\n";
+            exit(1);
+        }
+    }
+
+    return args;
+}
+
+} // namespace diffusion
