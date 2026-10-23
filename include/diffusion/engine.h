@@ -16,7 +16,8 @@ enum class DecodeMode {
 enum class InitStrategy {
     NGRAM = 0,
     RANDOM,
-    PAD
+    PAD,
+    DRAFT
 };
 
 enum class RngMode {
@@ -69,6 +70,11 @@ struct GenParams {
     int32_t ngram_n = 3;
     int32_t ngram_pool_max = 4096;
     int32_t max_iters = 0; // 0 = default (n_predict + 8)
+
+    // Speculative draft model options
+    std::string model_draft;
+    int32_t draft_n_gpu_layers = 0;
+    int32_t draft_n_predict = 4;
 
     std::vector<std::string> stop_strings;
     SamplerParams sampling;

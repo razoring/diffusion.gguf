@@ -16,6 +16,9 @@ void print_cli_help() {
               << "  -c, --ctx-size N         Context size (default: 2048)\n"
               << "  -t, --threads N          Number of CPU threads (default: 4)\n"
               << "  -ngl, --n-gpu-layers N   Number of layers to offload to GPU (default: 0)\n"
+              << "  -sm, --split-mode MODE   Multi-GPU split mode: none, layer (default), row\n"
+              << "  -mg, --main-gpu N        Main GPU index (default: 0)\n"
+              << "  -ts, --tensor-split S    Fraction of model to offload per GPU (e.g. '3,2')\n"
               << "  -fa, --flash-attn        Enable Flash Attention\n"
               << "  -s, --seed N             RNG seed (default: 42)\n\n"
               << "Sampling Options:\n"
@@ -26,11 +29,13 @@ void print_cli_help() {
               << "  --repeat-penalty FLOAT   Repeat penalty (default: 1.0)\n"
               << "  --repeat-last-n N        Repeat last n tokens (default: 64)\n"
               << "  --mirostat N             Mirostat (0=disabled, 1=v1, 2=v2)\n\n"
-              << "Diffusion / Jacobi Options:\n"
+              << "Diffusion / Speculative Options:\n"
               << "  --mode MODE              Decoding mode: block (default), whole, ar\n"
               << "  --block N                Jacobi block size (default: 32)\n"
               << "  --whole-max N            Max canvas size for whole mode (default: 512)\n"
-              << "  --init STRAT             Canvas init strategy: ngram (default), random, pad\n"
+              << "  --init STRAT             Canvas init strategy: ngram (default), random, pad, draft\n"
+              << "  -md, --model-draft PATH  Path to speculative draft model GGUF\n"
+              << "  -ngld, --draft-gpu N     Number of layers to offload for draft model (default: 0)\n"
               << "  --ngram-n N              N-gram context length for init guesser (default: 3)\n"
               << "  --ngram-pool N           N-gram pool max capacity (default: 4096)\n"
               << "  --max-iters N            Maximum iterations cap (default: n_predict + 8)\n"
@@ -95,6 +100,20 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.backend.n_threads = next_int("-t/--threads");
         } else if (arg == "-ngl" || arg == "--n-gpu-layers") {
             args.backend.n_gpu_layers = next_int("-ngl/--n-gpu-layers");
+        } else if (arg == "-sm" || arg == "--split-mode") {
+            std::string sm = next_str("-sm/--split-mode");
+            if (sm == "none") args.backend.split_mode = 0;
+            else if (sm == "row") args.backend.split_mode = 2;
+            else args.backend.split_mode = 1;
+        } else if (arg == "-mg" || arg == "--main-gpu") {
+            args.backend.main_gpu = next_int("-mg/--main-gpu");
+        } else if (arg == "-ts" || arg == "--tensor-split") {
+            args.backend.tensor_split_str = next_str("-ts/--tensor-split");
+        } else if (arg == "-md" || arg == "--model-draft") {
+            args.params.model_draft = next_str("-md/--model-draft");
+            args.params.init_strategy = InitStrategy::DRAFT;
+        } else if (arg == "-ngld" || arg == "--draft-gpu") {
+            args.params.draft_n_gpu_layers = next_int("-ngld/--draft-gpu");
         } else if (arg == "-fa" || arg == "--flash-attn") {
             args.backend.flash_attn = true;
         } else if (arg == "-s" || arg == "--seed") {
@@ -130,6 +149,7 @@ CliArgs parse_cli_args(int argc, char** argv) {
             std::string s = next_str("--init");
             if (s == "random") args.params.init_strategy = InitStrategy::RANDOM;
             else if (s == "pad") args.params.init_strategy = InitStrategy::PAD;
+            else if (s == "draft") args.params.init_strategy = InitStrategy::DRAFT;
             else args.params.init_strategy = InitStrategy::NGRAM;
         } else if (arg == "--ngram-n") {
             args.params.ngram_n = next_int("--ngram-n");

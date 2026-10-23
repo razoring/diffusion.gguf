@@ -9,6 +9,28 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = config.n_gpu_layers;
+    mparams.main_gpu = config.main_gpu;
+
+    if (config.split_mode == 0) {
+        mparams.split_mode = LLAMA_SPLIT_MODE_NONE;
+    } else if (config.split_mode == 2) {
+        mparams.split_mode = LLAMA_SPLIT_MODE_ROW;
+    } else {
+        mparams.split_mode = LLAMA_SPLIT_MODE_LAYER;
+    }
+
+    std::vector<float> tensor_split_floats;
+    if (!config.tensor_split_str.empty()) {
+        std::string s = config.tensor_split_str;
+        size_t pos = 0;
+        while ((pos = s.find(',')) != std::string::npos) {
+            std::string token = s.substr(0, pos);
+            if (!token.empty()) tensor_split_floats.push_back(std::stof(token));
+            s.erase(0, pos + 1);
+        }
+        if (!s.empty()) tensor_split_floats.push_back(std::stof(s));
+        mparams.tensor_split = tensor_split_floats.data();
+    }
 
     model_ = llama_model_load_from_file(config.model_path.c_str(), mparams);
     if (!model_) {

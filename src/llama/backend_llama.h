@@ -16,6 +16,11 @@ struct BackendConfig {
     int32_t n_threads = 4;
     bool flash_attn = false;
     bool swa_full = true;
+
+    // Multi-GPU options
+    int32_t split_mode = 1; // 0=none, 1=layer (default), 2=row
+    int32_t main_gpu = 0;
+    std::string tensor_split_str; // comma-separated proportions, e.g. "3,2" or "1,1"
 };
 
 class BackendLlama : public IModelBackend {
