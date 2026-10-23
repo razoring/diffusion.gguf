@@ -29,6 +29,7 @@ struct CliArgs {
     bool show_help = false;
     bool no_color = false;
     int render_fps = 30;
+    std::string numa_mode;
 };
 
 CliArgs parse_cli_args(int argc, char** argv);

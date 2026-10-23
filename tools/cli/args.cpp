@@ -20,14 +20,50 @@ void print_cli_help() {
               << "  -mg, --main-gpu N        Main GPU index (default: 0)\n"
               << "  -ts, --tensor-split S    Fraction of model to offload per GPU (e.g. '3,2')\n"
               << "  -fa, --flash-attn        Enable Flash Attention\n"
+              << "  --no-mmap                Do not memory-map model file\n"
+              << "  --mlock                  Lock model in RAM (prevent swap)\n"
+              << "  --check-tensors          Validate tensor data integrity\n"
+              << "  --numa MODE              NUMA optimization: distribute, isolate, numactl, mirror\n"
               << "  -s, --seed N             RNG seed (default: 42)\n\n"
-              << "Sampling Options:\n"
+              << "Model Adaptation & KV Quantization:\n"
+              << "  --lora PATH              Apply LoRA adapter\n"
+              << "  --lora-scaled PATH SCALE Apply LoRA adapter with user scale\n"
+              << "  --control-vector PATH    Apply control vector file\n"
+              << "  --cache-type-k TYPE      KV cache data type for K (f16, q8_0, q4_0, etc.)\n"
+              << "  --cache-type-v TYPE      KV cache data type for V (f16, q8_0, q4_0, etc.)\n\n"
+              << "Context & RoPE Options:\n"
+              << "  --prompt-cache PATH      File to cache prompt KV state for instant startup\n"
+              << "  --prompt-cache-ro        Open prompt cache read-only\n"
+              << "  --prompt-cache-all       Cache both prompt and generated tokens\n"
+              << "  --ctx-shift              Enable rolling context shifting on overflow (default: true)\n"
+              << "  --no-ctx-shift           Disable context shifting (stop at max context)\n"
+              << "  --n-keep N               Number of prompt tokens to preserve during shift (default: 0)\n"
+              << "  --n-discard N            Number of tokens to discard during shift\n"
+              << "  --rope-scaling TYPE      RoPE scaling type: none, linear, yarn\n"
+              << "  --rope-freq-base FLOAT   RoPE base frequency\n"
+              << "  --rope-freq-scale FLOAT  RoPE frequency scaling factor\n"
+              << "  --yarn-orig-ctx N        YaRN original context size\n"
+              << "  --yarn-ext-factor FLOAT  YaRN extrapolation factor\n"
+              << "  --yarn-attn-factor FLOAT YaRN attention magnitude factor\n"
+              << "  --yarn-beta-fast FLOAT   YaRN low correction dim\n"
+              << "  --yarn-beta-slow FLOAT   YaRN high correction dim\n\n"
+              << "Sampling & Reasoning Options:\n"
               << "  --temp FLOAT             Temperature (default: 0.8, 0 = greedy)\n"
               << "  --top-k N                Top-k sampling (default: 40)\n"
               << "  --top-p FLOAT            Top-p sampling (default: 0.95)\n"
               << "  --min-p FLOAT            Min-p sampling (default: 0.05)\n"
+              << "  --top-n-sigma FLOAT      Top-n sigma sampling\n"
+              << "  --adaptive-p-target F    Adaptive-p target probability\n"
+              << "  --adaptive-p-decay F     Adaptive-p EMA decay (default: 0.9)\n"
+              << "  -l, --logit-bias ID:BIAS Add bias to token ID (can repeat)\n"
+              << "  --logprobs               Compute and output token logprobs\n"
+              << "  --top-logprobs N         Output top N candidate logprobs per token\n"
+              << "  --extract-reasoning      Extract <think> tags as reasoning content\n"
+              << "  --reasoning-budget N     Maximum tokens allowed in reasoning block\n"
               << "  --repeat-penalty FLOAT   Repeat penalty (default: 1.0)\n"
               << "  --repeat-last-n N        Repeat last n tokens (default: 64)\n"
+              << "  --presence-penalty FLOAT Presence penalty (default: 0.0)\n"
+              << "  --frequency-penalty F    Frequency penalty (default: 0.0)\n"
               << "  --mirostat N             Mirostat (0=disabled, 1=v1, 2=v2)\n\n"
               << "Diffusion / Speculative Options:\n"
               << "  --mode MODE              Decoding mode: block (default), whole, ar\n"
@@ -53,7 +89,6 @@ void print_cli_help() {
               << "  -v, --version            Show version\n"
               << "  -h, --help               Show this help message\n";
 }
-
 
 CliArgs parse_cli_args(int argc, char** argv) {
     CliArgs args;
@@ -109,13 +144,93 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.backend.main_gpu = next_int("-mg/--main-gpu");
         } else if (arg == "-ts" || arg == "--tensor-split") {
             args.backend.tensor_split_str = next_str("-ts/--tensor-split");
+        } else if (arg == "-fa" || arg == "--flash-attn") {
+            args.backend.flash_attn = true;
+        } else if (arg == "--no-mmap") {
+            args.backend.use_mmap = false;
+        } else if (arg == "--mlock") {
+            args.backend.use_mlock = true;
+        } else if (arg == "--check-tensors") {
+            args.backend.check_tensors = true;
+        } else if (arg == "--numa") {
+            args.numa_mode = next_str("--numa");
+        } else if (arg == "--lora") {
+            args.backend.loras.push_back({next_str("--lora"), 1.0f});
+        } else if (arg == "--lora-scaled") {
+            std::string path = next_str("--lora-scaled path");
+            float scale = next_float("--lora-scaled scale");
+            args.backend.loras.push_back({path, scale});
+        } else if (arg == "--control-vector") {
+            args.backend.control_vector_path = next_str("--control-vector");
+        } else if (arg == "--cache-type-k") {
+            args.backend.cache_type_k = next_str("--cache-type-k");
+        } else if (arg == "--cache-type-v") {
+            args.backend.cache_type_v = next_str("--cache-type-v");
+        } else if (arg == "--prompt-cache") {
+            args.params.prompt_cache_path = next_str("--prompt-cache");
+            args.backend.prompt_cache_path = args.params.prompt_cache_path;
+        } else if (arg == "--prompt-cache-ro") {
+            args.params.prompt_cache_ro = true;
+            args.backend.prompt_cache_ro = true;
+        } else if (arg == "--prompt-cache-all") {
+            args.params.prompt_cache_all = true;
+            args.backend.prompt_cache_all = true;
+        } else if (arg == "--ctx-shift") {
+            args.params.ctx_shift = true;
+        } else if (arg == "--no-ctx-shift") {
+            args.params.ctx_shift = false;
+        } else if (arg == "--n-keep") {
+            args.params.n_keep = next_int("--n-keep");
+        } else if (arg == "--n-discard") {
+            args.params.n_discard = next_int("--n-discard");
+        } else if (arg == "--rope-scaling") {
+            std::string rs = next_str("--rope-scaling");
+            if (rs == "none") args.backend.rope_scaling_type = 0;
+            else if (rs == "linear") args.backend.rope_scaling_type = 1;
+            else if (rs == "yarn") args.backend.rope_scaling_type = 2;
+        } else if (arg == "--rope-freq-base") {
+            args.backend.rope_freq_base = next_float("--rope-freq-base");
+        } else if (arg == "--rope-freq-scale") {
+            args.backend.rope_freq_scale = next_float("--rope-freq-scale");
+        } else if (arg == "--yarn-orig-ctx") {
+            args.backend.yarn_orig_ctx = static_cast<uint32_t>(next_int("--yarn-orig-ctx"));
+        } else if (arg == "--yarn-ext-factor") {
+            args.backend.yarn_ext_factor = next_float("--yarn-ext-factor");
+        } else if (arg == "--yarn-attn-factor") {
+            args.backend.yarn_attn_factor = next_float("--yarn-attn-factor");
+        } else if (arg == "--yarn-beta-fast") {
+            args.backend.yarn_beta_fast = next_float("--yarn-beta-fast");
+        } else if (arg == "--yarn-beta-slow") {
+            args.backend.yarn_beta_slow = next_float("--yarn-beta-slow");
+        } else if (arg == "--logprobs") {
+            args.params.logprobs = true;
+        } else if (arg == "--top-logprobs") {
+            args.params.top_logprobs = next_int("--top-logprobs");
+            args.params.logprobs = true;
+        } else if (arg == "-l" || arg == "--logit-bias") {
+            std::string lb_str = next_str("-l/--logit-bias");
+            size_t colon = lb_str.find(':');
+            if (colon != std::string::npos) {
+                int32_t tok_id = std::stoi(lb_str.substr(0, colon));
+                float bias = std::stof(lb_str.substr(colon + 1));
+                args.params.sampling.logit_bias.push_back({tok_id, bias});
+            }
+        } else if (arg == "--top-n-sigma") {
+            args.params.sampling.top_n_sigma = next_float("--top-n-sigma");
+        } else if (arg == "--adaptive-p-target") {
+            args.params.sampling.adaptive_p_target = next_float("--adaptive-p-target");
+        } else if (arg == "--adaptive-p-decay") {
+            args.params.sampling.adaptive_p_decay = next_float("--adaptive-p-decay");
+        } else if (arg == "--extract-reasoning") {
+            args.params.extract_reasoning = true;
+        } else if (arg == "--reasoning-budget") {
+            args.params.reasoning_budget = next_int("--reasoning-budget");
+            args.params.extract_reasoning = true;
         } else if (arg == "-md" || arg == "--model-draft") {
             args.params.model_draft = next_str("-md/--model-draft");
             args.params.init_strategy = InitStrategy::DRAFT;
         } else if (arg == "-ngld" || arg == "--draft-gpu") {
             args.params.draft_n_gpu_layers = next_int("-ngld/--draft-gpu");
-        } else if (arg == "-fa" || arg == "--flash-attn") {
-            args.backend.flash_attn = true;
         } else if (arg == "-s" || arg == "--seed") {
             args.params.sampling.seed = static_cast<uint32_t>(next_int("-s/--seed"));
         } else if (arg == "--temp") {

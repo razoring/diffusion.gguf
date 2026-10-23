@@ -72,7 +72,8 @@ public:
     int n_ctx() const override { return 2048; }
     bool supports_kv_truncate() const override { return true; }
 
-    LogitsView eval(const int32_t* toks, int n, int pos0, bool want_all) override {
+    LogitsView eval(const int32_t* toks, int n, int pos0, bool want_all, int32_t seq_id = 0) override {
+        (void)seq_id;
         int n_rows = want_all ? n : 1;
         buf_.assign(n_rows * 1000, -100.0f);
 
@@ -90,11 +91,13 @@ public:
         return LogitsView{buf_.data(), 1000, n_rows};
     }
 
-    void kv_truncate(int pos) override {
+    void kv_truncate(int pos, int32_t seq_id = 0) override {
+        (void)seq_id;
         last_truncate_pos = pos;
     }
 
-    void kv_clear() override {
+    void kv_clear(int32_t seq_id = -1) override {
+        (void)seq_id;
         last_truncate_pos = 0;
     }
 

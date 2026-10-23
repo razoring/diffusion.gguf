@@ -111,6 +111,20 @@ std::unique_ptr<SamplerLlama> SamplerLlama::create(
     llama_sampler* chain = llama_sampler_chain_init(cparams);
     llama_sampler* pos_sampler = nullptr;
 
+    // 0. Logit bias
+    if (!params.logit_bias.empty()) {
+        std::vector<llama_logit_bias> biases;
+        biases.reserve(params.logit_bias.size());
+        for (const auto& b : params.logit_bias) {
+            biases.push_back(llama_logit_bias{b.first, b.second});
+        }
+        llama_sampler_chain_add(chain, llama_sampler_init_logit_bias(
+            n_vocab,
+            static_cast<int32_t>(biases.size()),
+            biases.data()
+        ));
+    }
+
     // 1. Grammar
     if (!params.grammar.empty()) {
         auto* smpl_grammar = llama_sampler_init_grammar(vocab, params.grammar.c_str(), "root");
@@ -163,6 +177,16 @@ std::unique_ptr<SamplerLlama> SamplerLlama::create(
         llama_sampler_chain_add(chain, llama_sampler_init_min_p(params.min_p, 1));
     }
 
+    // 7b. Top-n-sigma
+    if (params.top_n_sigma > 0.0f) {
+        llama_sampler_chain_add(chain, llama_sampler_init_top_n_sigma(params.top_n_sigma));
+    }
+
+    // 7c. Infill
+    if (params.infill) {
+        llama_sampler_chain_add(chain, llama_sampler_init_infill(vocab));
+    }
+
     // 8. XTC
     if (params.xtc_probability > 0.0f) {
         llama_sampler_chain_add(chain, llama_sampler_init_xtc(
@@ -189,6 +213,12 @@ std::unique_ptr<SamplerLlama> SamplerLlama::create(
     // 10. Terminal sampler
     if (params.temp <= 0.0f) {
         llama_sampler_chain_add(chain, llama_sampler_init_greedy());
+    } else if (params.adaptive_p_target >= 0.0f) {
+        llama_sampler_chain_add(chain, llama_sampler_init_adaptive_p(
+            params.adaptive_p_target,
+            params.adaptive_p_decay,
+            params.seed
+        ));
     } else if (params.mirostat == 1) {
         llama_sampler_chain_add(chain, llama_sampler_init_mirostat(
             n_vocab,
@@ -211,6 +241,7 @@ std::unique_ptr<SamplerLlama> SamplerLlama::create(
 
     bool is_pure_greedy = (params.temp <= 0.0f) &&
                            params.grammar.empty() &&
+                           params.logit_bias.empty() &&
                            (params.repeat_penalty == 1.0f) &&
                            (params.presence_penalty == 0.0f) &&
                            (params.frequency_penalty == 0.0f) &&

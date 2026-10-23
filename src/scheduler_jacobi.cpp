@@ -1,6 +1,7 @@
 #include "scheduler_jacobi.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 namespace diffusion {
 
@@ -32,33 +33,31 @@ GenResult SchedulerJacobi::run(
     // 1. Prefill prompt (with optional KV prefix reuse)
     LogitsView prefill_logits;
     if (reuse_prefix_len == 0) {
-        backend_.kv_clear();
-        prefill_logits = backend_.eval(prompt.data(), prompt_len, 0, false);
+        backend_.kv_clear(params.seq_id);
+        prefill_logits = backend_.eval(prompt.data(), prompt_len, 0, false, params.seq_id);
         for (int32_t tok : prompt) {
             sampler_.accept(tok);
         }
         guesser_.update_ngram(prompt);
     } else {
-        backend_.kv_truncate(reuse_prefix_len);
+        backend_.kv_truncate(reuse_prefix_len, params.seq_id);
         int new_len = prompt_len - reuse_prefix_len;
         if (new_len > 0) {
-            prefill_logits = backend_.eval(prompt.data() + reuse_prefix_len, new_len, reuse_prefix_len, false);
+            prefill_logits = backend_.eval(prompt.data() + reuse_prefix_len, new_len, reuse_prefix_len, false, params.seq_id);
             std::vector<int32_t> new_prompt_slice(prompt.begin() + reuse_prefix_len, prompt.end());
             for (int32_t tok : new_prompt_slice) {
                 sampler_.accept(tok);
             }
             guesser_.update_ngram(new_prompt_slice);
         } else {
-            backend_.kv_truncate(prompt_len - 1);
-            prefill_logits = backend_.eval(prompt.data() + prompt_len - 1, 1, prompt_len - 1, false);
+            backend_.kv_truncate(prompt_len - 1, params.seq_id);
+            prefill_logits = backend_.eval(prompt.data() + prompt_len - 1, 1, prompt_len - 1, false, params.seq_id);
         }
     }
 
     int n_predict = params.n_predict > 0 ? params.n_predict : 128;
     int B_target = (params.mode == DecodeMode::WHOLE) ? params.whole_max : params.block_size;
     if (B_target <= 0) B_target = 32;
-
-    int current_B = (params.mode == DecodeMode::WHOLE) ? B_target : std::min(4, B_target);
 
     int max_iters = params.max_iters > 0 ? params.max_iters : (n_predict + 8);
     int P = prompt_len;
@@ -86,11 +85,30 @@ GenResult SchedulerJacobi::run(
         result.iterations++;
         int B = static_cast<int>(c.size());
 
+        // Context shifting if context limit approached
+        if (P + B >= backend_.n_ctx()) {
+            if (params.ctx_shift && backend_.supports_kv_shift()) {
+                int n_keep = params.n_keep > 0 ? params.n_keep : 1;
+                int n_discard = params.n_discard > 0 ? params.n_discard : std::max(1, (backend_.n_ctx() - n_keep) / 2);
+                if (n_discard > 0 && P - n_discard >= n_keep) {
+                    backend_.kv_truncate(n_keep + n_discard, params.seq_id);
+                    backend_.kv_shift(params.seq_id, n_keep + n_discard, P, -n_discard);
+                    P -= n_discard;
+                } else {
+                    stop_reason = StopReason::MAX_TOKENS;
+                    break;
+                }
+            } else {
+                stop_reason = StopReason::MAX_TOKENS;
+                break;
+            }
+        }
+
         // Invariant I3: Truncate KV for uncommitted positions >= P
-        backend_.kv_truncate(P);
+        backend_.kv_truncate(P, params.seq_id);
 
         // Batched parallel evaluation of all B canvas tokens
-        LogitsView L = backend_.eval(c.data(), B, P, true);
+        LogitsView L = backend_.eval(c.data(), B, P, true, params.seq_id);
 
         // Walk hypothesized prefix sequentially on CPU to obtain predictions p
         auto st = sampler_.clone();
@@ -119,7 +137,6 @@ GenResult SchedulerJacobi::run(
             if (c[k + 1] == p[k + 1]) {
                 k++;
             } else {
-                // Statistical parity check: check if guess was near-tie with top-1 (< 0.05 logit delta)
                 const float* row = L.row(k);
                 if (row && c[k + 1] >= 0 && c[k + 1] < backend_.n_vocab() && p[k + 1] >= 0 && p[k + 1] < backend_.n_vocab()) {
                     float top_logit = row[p[k + 1]];
@@ -143,6 +160,42 @@ GenResult SchedulerJacobi::run(
             result.tokens.push_back(tok);
             committed_this_step.push_back(tok);
             result.text += tokenizer_.piece(tok);
+
+            // Optional logprob collection
+            if (params.logprobs && L.row(j)) {
+                TokenLogprobs tlp;
+                tlp.token = tok;
+                tlp.piece = tokenizer_.piece(tok);
+                const float* row = L.row(j);
+                int n_vocab = backend_.n_vocab();
+                float max_l = row[0];
+                for (int v = 1; v < n_vocab; ++v) {
+                    if (row[v] > max_l) max_l = row[v];
+                }
+                double sum_exp = 0.0;
+                for (int v = 0; v < n_vocab; ++v) {
+                    sum_exp += std::exp(row[v] - max_l);
+                }
+                float log_sum_exp = max_l + static_cast<float>(std::log(sum_exp));
+                tlp.logprob = (tok >= 0 && tok < n_vocab) ? (row[tok] - log_sum_exp) : -999.0f;
+                if (params.top_logprobs > 0) {
+                    int k_top = std::min(params.top_logprobs, n_vocab);
+                    std::vector<std::pair<float, int32_t>> candidates(n_vocab);
+                    for (int v = 0; v < n_vocab; ++v) {
+                        candidates[v] = { row[v], v };
+                    }
+                    std::partial_sort(candidates.begin(), candidates.begin() + k_top, candidates.end(),
+                        [](const auto& a, const auto& b) { return a.first > b.first; });
+                    for (int ct = 0; ct < k_top; ++ct) {
+                        tlp.top_logprobs.push_back(LogprobItem{
+                            candidates[ct].second,
+                            tokenizer_.piece(candidates[ct].second),
+                            candidates[ct].first - log_sum_exp
+                        });
+                    }
+                }
+                result.token_logprobs.push_back(std::move(tlp));
+            }
 
             // Invariant I4: Discard tokens after EOG
             if (tokenizer_.is_eog(tok)) {
@@ -180,7 +233,7 @@ GenResult SchedulerJacobi::run(
 
         int committed_count = static_cast<int>(committed_this_step.size());
         P += committed_count;
-        backend_.kv_truncate(P);
+        backend_.kv_truncate(P, params.seq_id);
 
         if (should_stop) {
             if (callback) {
@@ -227,7 +280,6 @@ GenResult SchedulerJacobi::run(
             next_c.push_back(tokenizer_.pad_or_fallback());
         }
 
-        // Only query confident guesses from context trie and n-gram pool
         int max_lookahead = remaining_needed - 1;
         if (max_lookahead > 0 && params.mode != DecodeMode::AR) {
             std::vector<int32_t> running_ctx = prompt;
@@ -237,23 +289,23 @@ GenResult SchedulerJacobi::run(
             auto probe = guesser_.make_guesses(max_lookahead, running_ctx);
             int32_t pad = tokenizer_.pad_or_fallback();
             for (int32_t g : probe) {
-                if (g == pad) break; // Prune at first unconfident token! Never evaluate padding!
+                if (g == pad) break;
                 next_c.push_back(g);
             }
         }
 
-        // Compute TokenDiff events for visual terminal shimmering and callbacks
+        // Compute TokenDiff events for visual terminal rendering
         std::vector<TokenDiff> diffs;
         for (size_t j = 0; j < next_c.size(); ++j) {
             size_t old_idx = committed_count + j;
             if (old_idx >= c.size() || c[old_idx] != next_c[j]) {
                 diffs.push_back(TokenDiff{
-                    static_cast<int>(j),
-                    (old_idx < c.size()) ? c[old_idx] : -1,
+                    static_cast<int>(old_idx),
+                    old_idx < c.size() ? c[old_idx] : -1,
                     next_c[j],
-                    (old_idx < c.size()) ? tokenizer_.piece(c[old_idx]) : "",
-                    tokenizer_.piece(next_c[j]),
-                    (j < conf.size()) ? conf[j] : 0.0f
+                    "",
+                    "",
+                    1.0f
                 });
             }
         }
@@ -272,24 +324,21 @@ GenResult SchedulerJacobi::run(
 
             if (!callback(ev)) {
                 stop_reason = StopReason::CANCELLED;
-                should_stop = true;
+                break;
             }
         }
-
-        if (should_stop) break;
 
         c = std::move(next_c);
     }
 
-
-    if (stop_reason == StopReason::NONE && static_cast<int>(result.tokens.size()) >= n_predict) {
+    if (result.iterations >= max_iters && stop_reason == StopReason::NONE) {
         stop_reason = StopReason::MAX_TOKENS;
     }
 
     auto t_end = std::chrono::steady_clock::now();
     result.total_time_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
     result.tok_per_iter = result.iterations > 0 ? (static_cast<double>(result.tokens.size()) / result.iterations) : 0.0;
-    result.tok_per_s = result.total_time_ms > 0.0 ? (result.tokens.size() / (result.total_time_ms / 1000.0)) : 0.0;
+    result.tok_per_s = result.total_time_ms > 0.0 ? (result.tokens.size() * 1000.0 / result.total_time_ms) : 0.0;
     result.stop_reason = stop_reason;
 
     return result;

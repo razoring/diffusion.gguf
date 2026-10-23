@@ -15,6 +15,7 @@ def run_server_tests():
         SERVER_BIN,
         "-m", MODEL_PATH,
         "--port", str(PORT),
+        "-np", "2",
         "--api-key", "test-secret-key",
         "--mode", "block",
         "--block", "8"
@@ -34,7 +35,6 @@ def run_server_tests():
                 time.sleep(0.25)
         else:
             raise RuntimeError("Server failed to start within timeout")
-
 
         print("Server is up and healthy.")
 
@@ -127,14 +127,81 @@ def run_server_tests():
         print(f"Test 6 (/v1/chat/completions stream): Passed. Streamed: {repr(chat_streamed_text)}")
         assert chat_streamed_text == chat_non_stream_text, f"Chat streamed mismatch: {repr(chat_streamed_text)} vs {repr(chat_non_stream_text)}"
 
-        # 7. Test invalid parameters (n > 1, logprobs)
-        r = requests.post(f"{BASE_URL}/v1/completions", headers=headers, json={"prompt": "hi", "n": 2})
-        assert r.status_code == 400
-        r = requests.post(f"{BASE_URL}/v1/completions", headers=headers, json={"prompt": "hi", "logprobs": 5})
-        assert r.status_code == 400
-        print("Test 7 (Rejections for n > 1 and logprobs): Passed")
+        # 7. Test logprobs in /v1/completions
+        lp_payload = {
+            "prompt": "Hello world",
+            "max_tokens": 8,
+            "logprobs": True,
+            "top_logprobs": 3,
+            "stream": False
+        }
+        r = requests.post(f"{BASE_URL}/v1/completions", headers=headers, json=lp_payload)
+        assert r.status_code == 200
+        lp_data = r.json()
+        choices = lp_data["choices"]
+        assert len(choices) > 0 and choices[0]["logprobs"] is not None
+        assert "content" in choices[0]["logprobs"]
+        assert len(choices[0]["logprobs"]["content"]) > 0
+        print("Test 7 (Logprobs and top_logprobs): Passed")
 
-        print("\nAll diffusion-server API tests PASSED successfully!")
+        # 8. Test /slots and /props
+        r = requests.get(f"{BASE_URL}/slots", headers=headers)
+        assert r.status_code == 200
+        slots = r.json()
+        assert len(slots) == 2, f"Expected 2 slots, got {len(slots)}"
+        print("Test 8 (/slots): Passed")
+
+        r = requests.get(f"{BASE_URL}/props", headers=headers)
+        assert r.status_code == 200
+        props = r.json()
+        assert props["total_slots"] == 2
+        print("Test 8b (/props): Passed")
+
+        # 9. Test /metrics (Prometheus)
+        r = requests.get(f"{BASE_URL}/metrics", headers=headers)
+        assert r.status_code == 200
+        assert "diffusion_requests_total" in r.text
+        assert "diffusion_slots_total 2" in r.text
+        print("Test 9 (/metrics): Passed")
+
+        # 10. Test /tokenize and /detokenize
+        r = requests.post(f"{BASE_URL}/tokenize", headers=headers, json={"content": "Once upon a time"})
+        assert r.status_code == 200
+        toks = r.json()["tokens"]
+        assert len(toks) > 0
+
+        r = requests.post(f"{BASE_URL}/detokenize", headers=headers, json={"tokens": toks})
+        assert r.status_code == 200
+        detok = r.json()["content"]
+        assert "Once" in detok
+        print("Test 10 (/tokenize and /detokenize): Passed")
+
+        # 11. Test /v1/embeddings
+        r = requests.post(f"{BASE_URL}/v1/embeddings", headers=headers, json={"input": "Hello world"})
+        assert r.status_code == 200
+        emb_data = r.json()
+        assert emb_data["object"] == "list"
+        assert len(emb_data["data"]) == 1
+        assert len(emb_data["data"][0]["embedding"]) > 0
+        print("Test 11 (/v1/embeddings): Passed")
+
+        # 12. Test /infill
+        r = requests.post(f"{BASE_URL}/infill", headers=headers, json={
+            "input_prefix": "def add(a, b):\n    return",
+            "input_suffix": "\nprint(add(2, 3))",
+            "max_tokens": 8
+        })
+        assert r.status_code == 200
+        infill_data = r.json()
+        assert "content" in infill_data
+        print("Test 12 (/infill): Passed")
+
+        # 13. Test /lora-adapters
+        r = requests.get(f"{BASE_URL}/lora-adapters", headers=headers)
+        assert r.status_code == 200
+        print("Test 13 (/lora-adapters): Passed")
+
+        print("\nAll diffusion-server API parity tests PASSED successfully!")
 
     finally:
         proc.terminate()

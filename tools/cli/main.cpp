@@ -4,6 +4,7 @@
 #include "render_progress.h"
 #include "repl.h"
 #include "engine.h"
+#include "ggml-cpu.h"
 #include <iostream>
 
 #ifdef _WIN32
@@ -44,6 +45,14 @@ int main(int argc, char** argv) {
 
     if (args.render_mode == diffusion::RenderMode::AUTO) {
         args.render_mode = is_stdout_tty() ? diffusion::RenderMode::LIVE : diffusion::RenderMode::FINAL;
+    }
+
+    if (!args.numa_mode.empty()) {
+        ggml_numa_strategy strategy = GGML_NUMA_STRATEGY_DISTRIBUTE;
+        if (args.numa_mode == "isolate") strategy = GGML_NUMA_STRATEGY_ISOLATE;
+        else if (args.numa_mode == "numactl") strategy = GGML_NUMA_STRATEGY_NUMACTL;
+        else if (args.numa_mode == "mirror") strategy = GGML_NUMA_STRATEGY_MIRROR;
+        ggml_numa_init(strategy);
     }
 
     try {

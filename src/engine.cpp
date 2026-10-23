@@ -2,6 +2,7 @@
 #include "init_guess.h"
 #include "scheduler_ar.h"
 #include "scheduler_jacobi.h"
+#include <algorithm>
 #include <stdexcept>
 
 namespace diffusion {
@@ -31,6 +32,19 @@ GenResult Engine::generate(
     const StepCallback& callback
 ) {
     if (prompt_tokens.empty()) return GenResult{};
+
+    // Handle prompt cache restoration
+    std::vector<int32_t> session_tokens;
+    if (!params.prompt_cache_path.empty()) {
+        if (backend_->load_prompt_cache(params.prompt_cache_path, session_tokens)) {
+            size_t match_len = 0;
+            while (match_len < prompt_tokens.size() && match_len < session_tokens.size() &&
+                   prompt_tokens[match_len] == session_tokens[match_len]) {
+                match_len++;
+            }
+            reuse_prefix_len = std::max(reuse_prefix_len, static_cast<int>(match_len));
+        }
+    }
 
     auto sampler = SamplerLlama::create(
         backend_->raw_vocab(),
@@ -75,14 +89,51 @@ GenResult Engine::generate(
         draft_sampler.get()
     );
 
+    GenResult result;
     if (params.mode == DecodeMode::AR) {
         SchedulerAR scheduler(*backend_, *tokenizer_, *sampler);
-        return scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
+        result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
     } else {
         SchedulerJacobi scheduler(*backend_, *tokenizer_, *sampler, guesser);
-        return scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
+        result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
     }
-}
 
+    // Save prompt cache if requested
+    if (!params.prompt_cache_path.empty() && !params.prompt_cache_ro) {
+        if (params.prompt_cache_all) {
+            std::vector<int32_t> all_tokens = prompt_tokens;
+            all_tokens.insert(all_tokens.end(), result.tokens.begin(), result.tokens.end());
+            backend_->save_prompt_cache(params.prompt_cache_path, all_tokens);
+        } else {
+            backend_->save_prompt_cache(params.prompt_cache_path, prompt_tokens);
+        }
+    }
+
+    // Extract DeepSeek reasoning tags (<think> ... </think>)
+    if (params.extract_reasoning) {
+        const std::string think_start = "<think>";
+        const std::string think_end = "</think>";
+        size_t s_pos = result.text.find(think_start);
+        if (s_pos != std::string::npos) {
+            size_t content_start = s_pos + think_start.size();
+            size_t e_pos = result.text.find(think_end, content_start);
+            if (e_pos != std::string::npos) {
+                result.reasoning_content = result.text.substr(content_start, e_pos - content_start);
+                std::string before = result.text.substr(0, s_pos);
+                std::string after = result.text.substr(e_pos + think_end.size());
+                size_t first_non_ws = after.find_first_not_of(" \t\r\n");
+                if (first_non_ws != std::string::npos) {
+                    after = after.substr(first_non_ws);
+                }
+                result.text = before + after;
+            } else {
+                result.reasoning_content = result.text.substr(content_start);
+                result.text = result.text.substr(0, s_pos);
+            }
+        }
+    }
+
+    return result;
+}
 
 } // namespace diffusion
