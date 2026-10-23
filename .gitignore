@@ -5,6 +5,9 @@ bin/
 out/
 .cache/
 
+build-cuda/
+build-ninja-cuda/
+
 # VS / IDE files
 .vs/
 *.user

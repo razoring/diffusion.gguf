@@ -156,6 +156,31 @@ int main() {
         std::cout << "Test 2 (Whole Jacobi): Passed. Iterations = " << res.iterations << ", Tokens = " << res.tokens.size() << "\n";
     }
 
+    // Test 3: NGRAM mode with ContextTrie multi-token acceptance
+    {
+        MockBackend ngram_backend;
+        ngram_backend.target = {1, 10, 20, 30, 40, 10, 20, 30, 40, 999};
+
+        InitGuesser guesser(InitStrategy::NGRAM, tokenizer, 1000, 42);
+        SchedulerJacobi jacobi(ngram_backend, tokenizer, sampler, guesser);
+
+        GenParams params;
+        params.n_predict = 15;
+        params.mode = DecodeMode::BLOCK;
+        params.block_size = 4;
+
+        GenResult res = jacobi.run({1}, params, [&](const StepEvent& ev) {
+            std::cout << "  Step " << ev.step << ": committed " << ev.committed_new.size() << " tokens:";
+            for (int32_t t : ev.committed_new) std::cout << " " << t;
+            std::cout << "\n";
+            return true;
+        });
+        std::vector<int32_t> expected = {10, 20, 30, 40, 10, 20, 30, 40, 999};
+        assert(res.tokens == expected);
+        assert(res.stop_reason == StopReason::EOG);
+        std::cout << "Test 3 (NGRAM Jacobi with multi-token acceptance): Passed. Iterations = " << res.iterations << ", Tokens = " << res.tokens.size() << "\n";
+    }
+
     std::cout << "All Jacobi mock invariant unit tests passed!\n";
     return 0;
 }

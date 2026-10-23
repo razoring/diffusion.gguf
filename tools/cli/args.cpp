@@ -67,7 +67,7 @@ void print_cli_help() {
               << "  --mirostat N             Mirostat (0=disabled, 1=v1, 2=v2)\n\n"
               << "Diffusion / Speculative Options:\n"
               << "  --mode MODE              Decoding mode: block (default), whole, ar\n"
-              << "  --block N                Jacobi block size (default: 32)\n"
+              << "  --block N                Jacobi block size (default: 4)\n"
               << "  --whole-max N            Max canvas size for whole mode (default: 512)\n"
               << "  --init STRAT             Canvas init strategy: ngram (default), random, pad, draft\n"
               << "  -md, --model-draft PATH  Path to speculative draft model GGUF\n"

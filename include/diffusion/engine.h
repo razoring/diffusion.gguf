@@ -86,7 +86,7 @@ struct TokenLogprobs {
 struct GenParams {
     int32_t n_predict = 128;
     DecodeMode mode = DecodeMode::BLOCK;
-    int32_t block_size = 32;
+    int32_t block_size = 4;
     int32_t whole_max = 512;
     InitStrategy init_strategy = InitStrategy::NGRAM;
     int32_t ngram_n = 3;

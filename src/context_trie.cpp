@@ -14,7 +14,7 @@ void ContextTrie::update(const std::vector<int32_t>& tokens) {
     // Index new n-grams spanning across boundary and newly added tokens
     size_t start_idx = (old_size >= static_cast<size_t>(max_order_)) ? (old_size - max_order_ + 1) : 0;
     for (size_t i = start_idx; i < full_history_.size(); ++i) {
-        for (int order = 2; order <= max_order_; ++order) {
+        for (int order = 1; order <= max_order_; ++order) {
             if (i + order <= full_history_.size()) {
                 uint64_t h = hash_ngram(&full_history_[i], order);
                 auto& offsets = index_[h];
@@ -61,4 +61,32 @@ std::vector<int32_t> ContextTrie::match_continuation(
     return result;
 }
 
+std::vector<int32_t> ContextTrie::chain_match(
+    const std::vector<int32_t>& context,
+    int count,
+    int min_match_len
+) const {
+    std::vector<int32_t> result;
+    if (count <= 0 || context.empty()) return result;
+
+    result.reserve(count);
+    std::vector<int32_t> current_ctx = context;
+    current_ctx.reserve(context.size() + count);
+
+    while (static_cast<int>(result.size()) < count) {
+        int needed = count - static_cast<int>(result.size());
+        auto chunk = match_continuation(current_ctx, needed, min_match_len);
+        if (chunk.empty()) {
+            break;
+        }
+        for (int32_t tok : chunk) {
+            result.push_back(tok);
+            current_ctx.push_back(tok);
+            if (static_cast<int>(result.size()) >= count) break;
+        }
+    }
+    return result;
+}
+
 } // namespace diffusion
+
