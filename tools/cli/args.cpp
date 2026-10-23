@@ -120,10 +120,10 @@ CliArgs parse_cli_args(int argc, char** argv) {
         } else if (arg == "--mode") {
             std::string mode_str = next_str("--mode");
             if (mode_str == "ar") args.params.mode = DecodeMode::AR;
-            else if (mode_str == "whole") args.params.mode = DecodeMode::WHOLE;
+            else if (mode_str == "whole" || mode_str == "jacobi-whole") args.params.mode = DecodeMode::WHOLE;
             else args.params.mode = DecodeMode::BLOCK;
-        } else if (arg == "--block") {
-            args.params.block_size = next_int("--block");
+        } else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
+            args.params.block_size = next_int("--block/--block-size");
         } else if (arg == "--whole-max") {
             args.params.whole_max = next_int("--whole-max");
         } else if (arg == "--init") {
@@ -155,7 +155,7 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.show_stats = true;
         } else if (arg == "--tokens-out") {
             args.tokens_out_file = next_str("--tokens-out");
-        } else if (arg == "-cnv" || arg == "--conversation") {
+        } else if (arg == "-cnv" || arg == "--conversation" || arg == "--chat" || arg == "-i") {
             args.conversation = true;
         } else if (arg == "-sys" || arg == "--system-prompt") {
             args.system_prompt = next_str("-sys/--system-prompt");
