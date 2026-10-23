@@ -65,9 +65,9 @@ void print_cli_help() {
               << "  --presence-penalty FLOAT Presence penalty (default: 0.0)\n"
               << "  --frequency-penalty F    Frequency penalty (default: 0.0)\n"
               << "  --mirostat N             Mirostat (0=disabled, 1=v1, 2=v2)\n\n"
-              << "Diffusion / Speculative Options:\n"
-              << "  --mode MODE              Decoding mode: block (default), whole, ar\n"
-              << "  --block N                Jacobi block size (default: 4)\n"
+              << "Diffusion Options:\n"
+              << "  --mode MODE              Decoding mode: block (default), whole\n"
+              << "  --block N                Jacobi block size (default: 2)\n"
               << "  --whole-max N            Max canvas size for whole mode (default: 512)\n"
               << "  --init STRAT             Canvas init strategy: ngram (default), random, pad, draft\n"
               << "  -md, --model-draft PATH  Path to speculative draft model GGUF\n"
@@ -253,9 +253,13 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.params.sampling.mirostat = next_int("--mirostat");
         } else if (arg == "--mode") {
             std::string mode_str = next_str("--mode");
-            if (mode_str == "ar") args.params.mode = DecodeMode::AR;
-            else if (mode_str == "whole" || mode_str == "jacobi-whole") args.params.mode = DecodeMode::WHOLE;
-            else args.params.mode = DecodeMode::BLOCK;
+            if (mode_str == "ar") {
+                throw std::runtime_error("Autoregressive mode ('ar') has been completely removed. diffusion.gguf only supports diffusion generation ('block' or 'whole').");
+            } else if (mode_str == "whole" || mode_str == "jacobi-whole") {
+                args.params.mode = DecodeMode::WHOLE;
+            } else {
+                args.params.mode = DecodeMode::BLOCK;
+            }
         } else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
             args.params.block_size = next_int("--block/--block-size");
         } else if (arg == "--whole-max") {

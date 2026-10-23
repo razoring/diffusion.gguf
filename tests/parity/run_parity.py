@@ -74,7 +74,7 @@ def query_oracle(prompt, port, n_predict=32):
     probs_data = data.get("completion_probabilities", [])
     return tokens, data.get("content", ""), probs_data
 
-def run_diffusion_cli(model_path, prompt, n_predict=32, mode="ar"):
+def run_diffusion_cli(model_path, prompt, n_predict=32, mode="block"):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
         tmp_path = tmp.name
 
@@ -140,7 +140,7 @@ def main():
         for idx, prompt in enumerate(PROMPTS):
             print(f"\n[{idx+1}/{len(PROMPTS)}] Prompt: \"{prompt}\"")
             oracle_tokens, oracle_text, oracle_probs = query_oracle(prompt, PORT, n_predict=32)
-            diff_tokens, diff_text = run_diffusion_cli(model_path, prompt, n_predict=32, mode="ar")
+            diff_tokens, diff_text = run_diffusion_cli(model_path, prompt, n_predict=32, mode="block")
 
             print(f"  Oracle tokens ({len(oracle_tokens)}): {oracle_tokens[:10]}...")
             print(f"  Diffusion tokens ({len(diff_tokens)}): {diff_tokens[:10]}...")

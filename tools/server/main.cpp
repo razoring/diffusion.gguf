@@ -196,7 +196,7 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         else if (arg == "--lora") cfg.backend.loras.push_back({next_str("--lora"), 1.0f});
         else if (arg == "--mode") {
             std::string m = next_str("--mode");
-            if (m == "ar") cfg.default_params.mode = DecodeMode::AR;
+            if (m == "ar") throw std::runtime_error("Autoregressive mode ('ar') has been completely removed. diffusion.gguf only supports diffusion generation ('block' or 'whole').");
             else if (m == "whole") cfg.default_params.mode = DecodeMode::WHOLE;
             else cfg.default_params.mode = DecodeMode::BLOCK;
         } else if (arg == "--block") cfg.default_params.block_size = next_int("--block");
@@ -359,8 +359,9 @@ static GenParams parse_request_params(const json& body, const GenParams& default
     if (body.contains("diffusion") && body["diffusion"].is_object()) {
         auto diff = body["diffusion"];
         std::string m = diff.value("mode", "");
-        if (m == "ar") params.mode = DecodeMode::AR;
-        else if (m == "whole") params.mode = DecodeMode::WHOLE;
+        if (m == "ar") {
+            throw std::runtime_error("Autoregressive mode ('ar') has been completely removed. diffusion.gguf only supports diffusion generation ('block' or 'whole').");
+        } else if (m == "whole") params.mode = DecodeMode::WHOLE;
         else if (m == "block") params.mode = DecodeMode::BLOCK;
 
         if (diff.contains("block_size")) params.block_size = diff["block_size"].get<int>();

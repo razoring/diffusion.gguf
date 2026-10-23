@@ -42,7 +42,6 @@ add_library(diffusion_core STATIC
     src/init_guess.cpp
     src/context_trie.cpp
     src/engine.cpp
-    src/scheduler_ar.cpp
     src/scheduler_jacobi.cpp
     src/llama/backend_llama.cpp
     src/llama/tokenizer_llama.cpp

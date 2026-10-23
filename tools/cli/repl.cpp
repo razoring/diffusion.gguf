@@ -64,9 +64,7 @@ void run_repl(Engine& engine, CliArgs& args) {
 
     std::vector<int32_t> cached_prompt_tokens;
 
-    const char* mode_name = "block";
-    if (args.params.mode == DecodeMode::WHOLE) mode_name = "whole";
-    else if (args.params.mode == DecodeMode::AR) mode_name = "ar";
+    const char* mode_name = (args.params.mode == DecodeMode::WHOLE) ? "whole" : "block";
 
     std::cout << "=== diffusion.gguf REPL (mode: " << mode_name
               << ", block: " << args.params.block_size << ") ===\n"
@@ -117,10 +115,15 @@ void run_repl(Engine& engine, CliArgs& args) {
 
         if (input.rfind("/mode ", 0) == 0) {
             std::string m = input.substr(6);
-            if (m == "ar") args.params.mode = DecodeMode::AR;
-            else if (m == "whole") args.params.mode = DecodeMode::WHOLE;
-            else args.params.mode = DecodeMode::BLOCK;
-            std::cout << "[Mode set to " << m << "]\n\n";
+            if (m == "ar") {
+                std::cout << "[Error: Autoregressive mode ('ar') has been completely removed. Use 'block' or 'whole']\n\n";
+            } else if (m == "whole") {
+                args.params.mode = DecodeMode::WHOLE;
+                std::cout << "[Mode set to whole]\n\n";
+            } else {
+                args.params.mode = DecodeMode::BLOCK;
+                std::cout << "[Mode set to block]\n\n";
+            }
             continue;
         }
 

@@ -23,3 +23,7 @@ models/
 __pycache__/
 *.pyc
 .venv/
+
+# Test workspace for opencode
+test_workspace/
+

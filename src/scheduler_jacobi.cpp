@@ -78,7 +78,7 @@ GenResult SchedulerJacobi::run(
     std::vector<int32_t> c;
     c.push_back(first_tok);
 
-    if (B_initial > 1 && params.mode != DecodeMode::AR) {
+    if (B_initial > 1) {
         running_history.push_back(first_tok);
         auto guesses = guesser_.make_guesses(B_initial - 1, running_history);
         running_history.pop_back();
@@ -291,22 +291,20 @@ GenResult SchedulerJacobi::run(
         }
 
         // Adaptive Self-Lookahead & Prompt Lookup Draft Generation
-        if (params.mode != DecodeMode::AR) {
-            int open_slots = remaining_needed - static_cast<int>(next_c.size());
-            if (open_slots > 0) {
-                running_history.push_back(next_c.back());
-                auto probe = guesser_.make_guesses(open_slots, running_history);
-                running_history.pop_back();
+        int open_slots = remaining_needed - static_cast<int>(next_c.size());
+        if (open_slots > 0) {
+            running_history.push_back(next_c.back());
+            auto probe = guesser_.make_guesses(open_slots, running_history);
+            running_history.pop_back();
 
-                for (int32_t g : probe) {
-                    next_c.push_back(g);
-                    if (static_cast<int>(next_c.size()) >= remaining_needed) break;
-                }
+            for (int32_t g : probe) {
+                next_c.push_back(g);
+                if (static_cast<int>(next_c.size()) >= remaining_needed) break;
             }
+        }
 
-            while (static_cast<int>(next_c.size()) < remaining_needed) {
-                next_c.push_back(next_c.back());
-            }
+        while (static_cast<int>(next_c.size()) < remaining_needed) {
+            next_c.push_back(next_c.back());
         }
 
         // Compute TokenDiff events for visual terminal rendering

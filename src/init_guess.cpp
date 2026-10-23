@@ -74,8 +74,8 @@ void InitGuesser::update_ngram(const std::vector<int32_t>& tokens) {
     context_trie_.update(tokens);
     const auto& hist = context_trie_.full_history();
     if (hist.size() >= 2) {
-        size_t window = std::min(static_cast<size_t>(16), hist.size());
-        std::vector<int32_t> slice(hist.end() - window, hist.end());
+        size_t lookback = std::min(hist.size(), tokens.size() + 8);
+        std::vector<int32_t> slice(hist.end() - lookback, hist.end());
         ngram_pool_.train(slice);
     }
 }

@@ -9,8 +9,7 @@ namespace diffusion {
 
 enum class DecodeMode {
     BLOCK = 0,
-    WHOLE,
-    AR
+    WHOLE
 };
 
 enum class InitStrategy {
@@ -86,7 +85,7 @@ struct TokenLogprobs {
 struct GenParams {
     int32_t n_predict = 128;
     DecodeMode mode = DecodeMode::BLOCK;
-    int32_t block_size = 4;
+    int32_t block_size = 2;
     int32_t whole_max = 512;
     InitStrategy init_strategy = InitStrategy::NGRAM;
     int32_t ngram_n = 3;
