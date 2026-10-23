@@ -1,0 +1,14 @@
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 3a469bc..8bf7e0a 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -1710,6 +1710,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
+         }
+     }
+ 
++    // handle any pending shifts/copies/truncations before batch position check
++    memory_update(false);
++
+     if (!balloc->init(batch_inp, vocab, memory.get(), n_embd, n_seq_max, output_all)) {
+         LLAMA_LOG_ERROR("%s: failed to initialize batch\n", __func__);
+         return -1;
