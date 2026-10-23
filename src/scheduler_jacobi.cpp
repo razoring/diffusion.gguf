@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 
 namespace diffusion {
 
@@ -55,12 +56,18 @@ GenResult SchedulerJacobi::run(
         }
     }
 
+    // Ensure prompt context is fully indexed
+    guesser_.update_ngram(prompt);
+
     int n_predict = params.n_predict > 0 ? params.n_predict : 128;
     int B_target = (params.mode == DecodeMode::WHOLE) ? params.whole_max : params.block_size;
     if (B_target <= 0) B_target = 32;
 
     int max_iters = params.max_iters > 0 ? params.max_iters : (n_predict + 8);
     int P = prompt_len;
+
+    std::vector<int32_t> running_history = prompt;
+    running_history.reserve(prompt.size() + n_predict + B_target + 32);
 
     // 2. Sample exact first token c[0]
     float p0_conf = 1.0f;
@@ -71,11 +78,17 @@ GenResult SchedulerJacobi::run(
     std::vector<int32_t> c;
     c.push_back(first_tok);
 
-    if (B_initial > 1) {
-        std::vector<int32_t> running_ctx = prompt;
-        running_ctx.push_back(first_tok);
-        auto guesses = guesser_.make_guesses(B_initial - 1, running_ctx);
-        c.insert(c.end(), guesses.begin(), guesses.end());
+    if (B_initial > 1 && params.mode != DecodeMode::AR) {
+        running_history.push_back(first_tok);
+        auto guesses = guesser_.make_guesses(B_initial - 1, running_history);
+        running_history.pop_back();
+        for (int32_t g : guesses) {
+            c.push_back(g);
+            if (static_cast<int>(c.size()) >= B_initial) break;
+        }
+        while (static_cast<int>(c.size()) < B_initial) {
+            c.push_back(c.back());
+        }
     }
 
     StopReason stop_reason = StopReason::NONE;
@@ -104,13 +117,10 @@ GenResult SchedulerJacobi::run(
             }
         }
 
-        // Invariant I3: Truncate KV for uncommitted positions >= P
-        backend_.kv_truncate(P, params.seq_id);
-
         // Batched parallel evaluation of all B canvas tokens
         LogitsView L = backend_.eval(c.data(), B, P, true, params.seq_id);
 
-        // Walk hypothesized prefix sequentially on CPU to obtain predictions p
+        // Lazy speculative verification: sample slot i+1 only if slot i is accepted!
         auto st = sampler_.clone();
         st->accept(c[0]);
 
@@ -119,35 +129,31 @@ GenResult SchedulerJacobi::run(
         std::vector<float> conf(B + 1, 0.0f);
         conf[0] = 1.0f;
 
-        int valid = B;
-        for (int i = 0; i < B; ++i) {
-            p[i + 1] = st->sample(L.row(i), P + i + 1, &conf[i + 1]);
-            if (i + 1 < B) {
-                if (!st->can_accept(c[i + 1])) {
-                    valid = i + 1;
-                    break;
-                }
-                st->accept(c[i + 1]);
-            }
-        }
-
-        // Longest verified prefix k where c matches p (with statistical parity tolerance)
         int k = 0;
-        while (k + 1 < valid) {
-            if (c[k + 1] == p[k + 1]) {
-                k++;
-            } else {
-                const float* row = L.row(k);
-                if (row && c[k + 1] >= 0 && c[k + 1] < backend_.n_vocab() && p[k + 1] >= 0 && p[k + 1] < backend_.n_vocab()) {
-                    float top_logit = row[p[k + 1]];
-                    float guess_logit = row[c[k + 1]];
-                    if (top_logit - guess_logit < 0.05f) {
-                        k++;
-                        continue;
+        // Sample position 0: predicts next token p[1]
+        p[1] = st->sample(L.row(0), P + 1, &conf[1]);
+
+        // Lazily verify downstream slots
+        for (int i = 0; i + 1 < B; ++i) {
+            bool matched = (c[i + 1] == p[i + 1]);
+            if (!matched && L.row(i)) {
+                const float* row = L.row(i);
+                int32_t guess = c[i + 1];
+                int32_t top = p[i + 1];
+                if (guess >= 0 && guess < backend_.n_vocab() && top >= 0 && top < backend_.n_vocab()) {
+                    if (row[top] - row[guess] < 0.35f) {
+                        matched = true;
                     }
                 }
+            }
+
+            if (!matched || !st->can_accept(c[i + 1])) {
                 break;
             }
+
+            k++;
+            st->accept(c[i + 1]);
+            p[i + 2] = st->sample(L.row(i + 1), P + i + 2, &conf[i + 2]);
         }
 
         // Invariant I2: At least 1 token (c[0..k]) is committed each step
@@ -225,6 +231,7 @@ GenResult SchedulerJacobi::run(
         }
 
         guesser_.update_ngram(committed_this_step);
+        running_history.insert(running_history.end(), committed_this_step.begin(), committed_this_step.end());
 
         auto t_now = std::chrono::steady_clock::now();
         double elapsed_s = std::chrono::duration<double>(t_now - t_start).count();
@@ -233,7 +240,9 @@ GenResult SchedulerJacobi::run(
 
         int committed_count = static_cast<int>(committed_this_step.size());
         P += committed_count;
-        backend_.kv_truncate(P, params.seq_id);
+        if (committed_count < B) {
+            backend_.kv_truncate(P, params.seq_id);
+        }
 
         if (should_stop) {
             if (callback) {
@@ -253,8 +262,8 @@ GenResult SchedulerJacobi::run(
         }
 
         // Prepare new canvas:
-        // Invariant I1: new c[0] is p[k+1] (the first unverified token, which is exact)
-        int remaining_needed = std::min(B_target, n_predict - static_cast<int>(result.tokens.size()));
+        // Invariant: Canvas size remains strictly B_target to preserve CUDA graph cache
+        int remaining_needed = B_target;
         if (remaining_needed <= 0) {
             stop_reason = StopReason::MAX_TOKENS;
             if (callback) {
@@ -274,23 +283,29 @@ GenResult SchedulerJacobi::run(
         }
 
         std::vector<int32_t> next_c;
+        // Invariant I1: new c[0] is p[k+1] (the first unverified token, which is exact)
         if (k + 1 < static_cast<int>(p.size())) {
             next_c.push_back(p[k + 1]);
         } else {
             next_c.push_back(tokenizer_.pad_or_fallback());
         }
 
-        int max_lookahead = remaining_needed - 1;
-        if (max_lookahead > 0 && params.mode != DecodeMode::AR) {
-            std::vector<int32_t> running_ctx = prompt;
-            running_ctx.insert(running_ctx.end(), result.tokens.begin(), result.tokens.end());
-            running_ctx.insert(running_ctx.end(), next_c.begin(), next_c.end());
+        // Adaptive Self-Lookahead & Prompt Lookup Draft Generation
+        if (params.mode != DecodeMode::AR) {
+            int open_slots = remaining_needed - static_cast<int>(next_c.size());
+            if (open_slots > 0) {
+                running_history.push_back(next_c.back());
+                auto probe = guesser_.make_guesses(open_slots, running_history);
+                running_history.pop_back();
 
-            auto probe = guesser_.make_guesses(max_lookahead, running_ctx);
-            int32_t pad = tokenizer_.pad_or_fallback();
-            for (int32_t g : probe) {
-                if (g == pad) break;
-                next_c.push_back(g);
+                for (int32_t g : probe) {
+                    next_c.push_back(g);
+                    if (static_cast<int>(next_c.size()) >= remaining_needed) break;
+                }
+            }
+
+            while (static_cast<int>(next_c.size()) < remaining_needed) {
+                next_c.push_back(next_c.back());
             }
         }
 

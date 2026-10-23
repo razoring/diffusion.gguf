@@ -21,6 +21,11 @@ SamplerLlama::~SamplerLlama() {
 }
 
 std::unique_ptr<ISamplerChain> SamplerLlama::clone() const {
+    if (is_pure_greedy_) {
+        auto result = std::make_unique<SamplerLlama>(nullptr, vocab_, nullptr);
+        result->set_pure_greedy(true);
+        return result;
+    }
     if (!chain_) return nullptr;
     llama_sampler* cloned = llama_sampler_clone(chain_);
     // Locate positional sampler within cloned chain if present
@@ -52,11 +57,57 @@ bool SamplerLlama::can_accept(int32_t /*tok*/) const {
     return true;
 }
 
-int32_t SamplerLlama::sample(const float* logits, int abs_pos, float* out_prob) {
-    if (!chain_ || !logits) return 0;
+#if defined(__AVX2__) || defined(_M_AMD64) || defined(_M_X64)
+#include <immintrin.h>
 
-    // Fast-path: Pure greedy decoding directly searches maximum logit
+static inline int32_t fast_argmax_simd(const float* data, int n) {
+    if (n <= 0) return 0;
+    int i = 0;
+    __m256 max_val = _mm256_set1_ps(-1e30f);
+    __m256i best_idx = _mm256_setzero_si256();
+    __m256i step = _mm256_set1_epi32(8);
+    __m256i cur_idx = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+
+    for (; i + 8 <= n; i += 8) {
+        __m256 v = _mm256_loadu_ps(data + i);
+        __m256 mask = _mm256_cmp_ps(v, max_val, _CMP_GT_OQ);
+        max_val = _mm256_blendv_ps(max_val, v, mask);
+        best_idx = _mm256_blendv_epi8(best_idx, cur_idx, _mm256_castps_si256(mask));
+        cur_idx = _mm256_add_epi32(cur_idx, step);
+    }
+
+    alignas(32) float vals[8];
+    alignas(32) int32_t idxs[8];
+    _mm256_storeu_ps(vals, max_val);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(idxs), best_idx);
+
+    float global_max = vals[0];
+    int32_t global_best = idxs[0];
+    for (int j = 1; j < 8; ++j) {
+        if (vals[j] > global_max) {
+            global_max = vals[j];
+            global_best = idxs[j];
+        }
+    }
+
+    for (; i < n; ++i) {
+        if (data[i] > global_max) {
+            global_max = data[i];
+            global_best = i;
+        }
+    }
+    return global_best;
+}
+#endif
+
+int32_t SamplerLlama::sample(const float* logits, int abs_pos, float* out_prob) {
+    if (!logits) return 0;
+
+    // Fast-path: SIMD vectorized argmax for pure greedy decoding
     if (is_pure_greedy_ && n_vocab_ > 0) {
+#if defined(__AVX2__) || defined(_M_AMD64) || defined(_M_X64)
+        int32_t best_id = fast_argmax_simd(logits, n_vocab_);
+#else
         int32_t best_id = 0;
         float max_val = logits[0];
         for (int32_t i = 1; i < n_vocab_; ++i) {
@@ -65,9 +116,12 @@ int32_t SamplerLlama::sample(const float* logits, int abs_pos, float* out_prob) 
                 best_id = i;
             }
         }
+#endif
         if (out_prob) *out_prob = 1.0f;
         return best_id;
     }
+
+    if (!chain_) return 0;
 
     if (pos_sampler_) {
         llama_sampler_dist_positional_set_pos(pos_sampler_, abs_pos);

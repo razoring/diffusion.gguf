@@ -19,7 +19,7 @@ void NgramPool::train(const std::vector<int32_t>& tokens) {
     if (tokens.size() < 2) return;
 
     for (size_t i = 0; i < tokens.size(); ++i) {
-        for (int order = 2; order <= std::min(4, n_); ++order) {
+        for (int order = 2; order <= std::min(8, n_); ++order) {
             if (i + order <= tokens.size()) {
                 if (static_cast<int>(table_.size()) >= max_entries_) break;
                 uint64_t h = hash_prefix(&tokens[i], order - 1);
@@ -37,7 +37,7 @@ int32_t NgramPool::predict(const std::vector<int32_t>& context, int32_t fallback
     if (context.empty()) return fallback;
 
     int ctx_len = static_cast<int>(context.size());
-    for (int order = std::min(4, n_); order >= 2; --order) {
+    for (int order = std::min(8, n_); order >= 2; --order) {
         int prefix_len = order - 1;
         if (ctx_len >= prefix_len) {
             const int32_t* ptr = context.data() + (ctx_len - prefix_len);
@@ -64,19 +64,25 @@ InitGuesser::InitGuesser(
     tokenizer_(tokenizer),
     n_vocab_(n_vocab),
     rng_(seed),
-    ngram_pool_(ngram_n, ngram_pool_max),
-    context_trie_(5),
+    ngram_pool_(std::max(4, ngram_n), ngram_pool_max),
+    context_trie_(12),
     draft_backend_(draft_backend),
     draft_sampler_(draft_sampler) {}
 
 void InitGuesser::update_ngram(const std::vector<int32_t>& tokens) {
-    ngram_pool_.train(tokens);
+    if (tokens.empty()) return;
     context_trie_.update(tokens);
+    const auto& hist = context_trie_.full_history();
+    if (hist.size() >= 2) {
+        size_t window = std::min(static_cast<size_t>(16), hist.size());
+        std::vector<int32_t> slice(hist.end() - window, hist.end());
+        ngram_pool_.train(slice);
+    }
 }
 
 std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int32_t>& context) {
     std::vector<int32_t> guesses;
-    if (count <= 0) return guesses;
+    if (count <= 0 || context.empty()) return guesses;
     guesses.reserve(count);
 
     int32_t fallback_pad = tokenizer_.pad_or_fallback();
@@ -112,51 +118,63 @@ std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int3
         }
     }
 
-    // In NGRAM mode, first try high-yield multi-token phrase match from ContextTrie
+    // In NGRAM mode (native self-diffusion), match high-confidence chained phrases
     if (strategy_ == InitStrategy::NGRAM && !context.empty()) {
-        auto phrase = context_trie_.match_continuation(context, count, 2);
-        if (!phrase.empty()) {
-            guesses.insert(guesses.end(), phrase.begin(), phrase.end());
-            if (static_cast<int>(guesses.size()) >= count) {
-                return guesses;
+        // 1. High-confidence chained phrase match from ContextTrie (order down to 1)
+        auto phrase = context_trie_.chain_match(context, count, 1);
+        for (int32_t tok : phrase) {
+            if (tokenizer_.is_eog(tok)) break;
+            guesses.push_back(tok);
+            if (static_cast<int>(guesses.size()) >= count) break;
+        }
+
+        // 2. Iterative N-gram prediction from learned pool (order >= 2)
+        if (static_cast<int>(guesses.size()) < count) {
+            std::vector<int32_t> running_ctx = context;
+            running_ctx.insert(running_ctx.end(), guesses.begin(), guesses.end());
+            while (static_cast<int>(guesses.size()) < count) {
+                int32_t pred = ngram_pool_.predict(running_ctx, -1);
+                if (pred < 0 || tokenizer_.is_eog(pred)) {
+                    break;
+                }
+                guesses.push_back(pred);
+                running_ctx.push_back(pred);
             }
         }
+
+        // 3. Fallback backoff continuation from parent syntactic context
+        if (static_cast<int>(guesses.size()) < count && context.size() >= 2) {
+            std::vector<int32_t> backoff_ctx(context.end() - 2, context.end() - 1);
+            auto backoff_phrase = context_trie_.chain_match(backoff_ctx, count - static_cast<int>(guesses.size()), 1);
+            for (int32_t tok : backoff_phrase) {
+                if (tokenizer_.is_eog(tok)) break;
+                guesses.push_back(tok);
+                if (static_cast<int>(guesses.size()) >= count) break;
+            }
+        }
+
+        // 4. Keep batch size strictly static: pad open slots so CUDA graph warmup never resets
+        int needed = count - static_cast<int>(guesses.size());
+        if (needed > 0) {
+            int32_t pad_tok = guesses.empty() ? context.back() : guesses.back();
+            if (tokenizer_.is_eog(pad_tok)) pad_tok = fallback_pad;
+            for (int i = 0; i < needed; ++i) {
+                guesses.push_back(pad_tok);
+            }
+        }
+        return guesses;
     }
 
-    std::vector<int32_t> running_ctx = context;
-    running_ctx.insert(running_ctx.end(), guesses.begin(), guesses.end());
-
+    // For RANDOM / PAD strategies (testing modes)
     int needed = count - static_cast<int>(guesses.size());
     for (int i = 0; i < needed; ++i) {
         int32_t guess = fallback_pad;
-
-        switch (strategy_) {
-            case InitStrategy::RANDOM: {
-                std::uniform_int_distribution<int32_t> dist(0, std::max(0, n_vocab_ - 1));
-                guess = dist(rng_);
-                // Avoid picking control / EOG tokens as random canvas noise
-                if (tokenizer_.is_eog(guess)) {
-                    guess = fallback_pad;
-                }
-                break;
-            }
-            case InitStrategy::NGRAM: {
-                guess = ngram_pool_.predict(running_ctx, fallback_pad);
-                break;
-            }
-            case InitStrategy::DRAFT: {
-                guess = ngram_pool_.predict(running_ctx, fallback_pad);
-                break;
-            }
-            case InitStrategy::PAD:
-            default: {
-                guess = fallback_pad;
-                break;
-            }
+        if (strategy_ == InitStrategy::RANDOM) {
+            std::uniform_int_distribution<int32_t> dist(0, std::max(0, n_vocab_ - 1));
+            guess = dist(rng_);
+            if (tokenizer_.is_eog(guess)) guess = fallback_pad;
         }
-
         guesses.push_back(guess);
-        running_ctx.push_back(guess);
     }
 
     return guesses;

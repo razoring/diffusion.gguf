@@ -9,7 +9,7 @@ namespace diffusion {
 
 class ContextTrie {
 public:
-    explicit ContextTrie(int max_order = 5);
+    explicit ContextTrie(int max_order = 12);
 
     // Updates trie with new tokens
     void update(const std::vector<int32_t>& tokens);
@@ -19,11 +19,20 @@ public:
     std::vector<int32_t> match_continuation(
         const std::vector<int32_t>& context,
         int count,
-        int min_match_len = 2
+        int min_match_len = 1
     ) const;
 
+    // Chained continuation matching: iteratively extends context until 'count' tokens are collected
+    std::vector<int32_t> chain_match(
+        const std::vector<int32_t>& context,
+        int count,
+        int min_match_len = 1
+    ) const;
+
+    const std::vector<int32_t>& full_history() const { return full_history_; }
+
 private:
-    int max_order_ = 5;
+    int max_order_ = 12;
     std::vector<int32_t> full_history_;
 
     // Fast hash table mapping n-gram prefix hash to array of occurrence offsets in full_history_
