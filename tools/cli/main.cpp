@@ -25,7 +25,13 @@ int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
 #endif
 
-    diffusion::CliArgs args = diffusion::parse_cli_args(argc, argv);
+    diffusion::CliArgs args;
+    try {
+        args = diffusion::parse_cli_args(argc, argv);
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
 
     if (args.show_version) {
         std::cout << "diffusion-cli (diffusion.gguf) version 0.1.0\n";

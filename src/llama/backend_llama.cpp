@@ -60,8 +60,9 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = config.n_ctx;
-    cparams.n_batch = config.n_batch;
-    cparams.n_ubatch = config.n_ubatch;
+    cparams.n_rs_seq = 8;
+    cparams.n_batch = std::max((uint32_t)config.n_batch, cparams.n_rs_seq + 1);
+    cparams.n_ubatch = std::max((uint32_t)config.n_ubatch, cparams.n_rs_seq + 1);
     cparams.n_threads = config.n_threads;
     cparams.n_threads_batch = config.n_threads;
     cparams.swa_full = config.swa_full;
@@ -147,8 +148,11 @@ const llama_vocab* BackendLlama::raw_vocab() const {
 }
 
 bool BackendLlama::supports_kv_truncate() const {
-    if (!model_) return false;
-    return !llama_model_is_recurrent(model_) && !llama_model_is_hybrid(model_);
+    if (!model_ || !ctx_) return false;
+    if (!llama_model_is_recurrent(model_) && !llama_model_is_hybrid(model_)) {
+        return true;
+    }
+    return llama_n_rs_seq(ctx_) > 0;
 }
 
 bool BackendLlama::supports_kv_shift() const {

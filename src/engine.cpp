@@ -1,6 +1,5 @@
 #include "engine.h"
 #include "init_guess.h"
-#include "scheduler_ar.h"
 #include "scheduler_jacobi.h"
 #include <algorithm>
 #include <stdexcept>
@@ -89,14 +88,8 @@ GenResult Engine::generate(
         draft_sampler.get()
     );
 
-    GenResult result;
-    if (params.mode == DecodeMode::AR) {
-        SchedulerAR scheduler(*backend_, *tokenizer_, *sampler);
-        result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
-    } else {
-        SchedulerJacobi scheduler(*backend_, *tokenizer_, *sampler, guesser);
-        result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
-    }
+    SchedulerJacobi scheduler(*backend_, *tokenizer_, *sampler, guesser);
+    GenResult result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
 
     // Save prompt cache if requested
     if (!params.prompt_cache_path.empty() && !params.prompt_cache_ro) {
