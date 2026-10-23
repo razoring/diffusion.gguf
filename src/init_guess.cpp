@@ -16,28 +16,37 @@ uint64_t NgramPool::hash_prefix(const int32_t* toks, int len) const {
 }
 
 void NgramPool::train(const std::vector<int32_t>& tokens) {
-    if (static_cast<int>(tokens.size()) < n_) return;
+    if (tokens.size() < 2) return;
 
-    for (size_t i = 0; i + n_ <= tokens.size(); ++i) {
-        if (static_cast<int>(table_.size()) >= max_entries_) break;
-        uint64_t h = hash_prefix(&tokens[i], n_ - 1);
-        int32_t next_tok = tokens[i + n_ - 1];
-        auto& list = table_[h];
-        if (std::find(list.begin(), list.end(), next_tok) == list.end()) {
-            list.push_back(next_tok);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        for (int order = 2; order <= std::min(4, n_); ++order) {
+            if (i + order <= tokens.size()) {
+                if (static_cast<int>(table_.size()) >= max_entries_) break;
+                uint64_t h = hash_prefix(&tokens[i], order - 1);
+                int32_t next_tok = tokens[i + order - 1];
+                auto& list = table_[h];
+                if (std::find(list.begin(), list.end(), next_tok) == list.end()) {
+                    list.push_back(next_tok);
+                }
+            }
         }
     }
 }
 
 int32_t NgramPool::predict(const std::vector<int32_t>& context, int32_t fallback) const {
-    int prefix_len = n_ - 1;
-    if (static_cast<int>(context.size()) < prefix_len) return fallback;
+    if (context.empty()) return fallback;
 
-    const int32_t* ptr = context.data() + (context.size() - prefix_len);
-    uint64_t h = hash_prefix(ptr, prefix_len);
-    auto it = table_.find(h);
-    if (it != table_.end() && !it->second.empty()) {
-        return it->second.back();
+    int ctx_len = static_cast<int>(context.size());
+    for (int order = std::min(4, n_); order >= 2; --order) {
+        int prefix_len = order - 1;
+        if (ctx_len >= prefix_len) {
+            const int32_t* ptr = context.data() + (ctx_len - prefix_len);
+            uint64_t h = hash_prefix(ptr, prefix_len);
+            auto it = table_.find(h);
+            if (it != table_.end() && !it->second.empty()) {
+                return it->second.back();
+            }
+        }
     }
     return fallback;
 }
@@ -53,10 +62,12 @@ InitGuesser::InitGuesser(
     tokenizer_(tokenizer),
     n_vocab_(n_vocab),
     rng_(seed),
-    ngram_pool_(ngram_n, ngram_pool_max) {}
+    ngram_pool_(ngram_n, ngram_pool_max),
+    context_trie_(5) {}
 
 void InitGuesser::update_ngram(const std::vector<int32_t>& tokens) {
     ngram_pool_.train(tokens);
+    context_trie_.update(tokens);
 }
 
 std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int32_t>& context) {
@@ -65,9 +76,23 @@ std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int3
     guesses.reserve(count);
 
     int32_t fallback_pad = tokenizer_.pad_or_fallback();
-    std::vector<int32_t> running_ctx = context;
 
-    for (int i = 0; i < count; ++i) {
+    // In NGRAM mode, first try high-yield multi-token phrase match from ContextTrie
+    if (strategy_ == InitStrategy::NGRAM && !context.empty()) {
+        auto phrase = context_trie_.match_continuation(context, count, 2);
+        if (!phrase.empty()) {
+            guesses.insert(guesses.end(), phrase.begin(), phrase.end());
+            if (static_cast<int>(guesses.size()) >= count) {
+                return guesses;
+            }
+        }
+    }
+
+    std::vector<int32_t> running_ctx = context;
+    running_ctx.insert(running_ctx.end(), guesses.begin(), guesses.end());
+
+    int needed = count - static_cast<int>(guesses.size());
+    for (int i = 0; i < needed; ++i) {
         int32_t guess = fallback_pad;
 
         switch (strategy_) {

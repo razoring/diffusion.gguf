@@ -40,6 +40,7 @@ endif()
 add_library(diffusion_core STATIC
     src/utf8.cpp
     src/init_guess.cpp
+    src/context_trie.cpp
     src/engine.cpp
     src/scheduler_ar.cpp
     src/scheduler_jacobi.cpp
