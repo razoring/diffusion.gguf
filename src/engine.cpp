@@ -42,13 +42,37 @@ GenResult Engine::generate(
         throw std::runtime_error("Failed to construct sampler chain");
     }
 
+    std::unique_ptr<BackendLlama> draft_backend;
+    std::unique_ptr<SamplerLlama> draft_sampler;
+    InitStrategy strat = params.init_strategy;
+
+    if (!params.model_draft.empty()) {
+        try {
+            BackendConfig dconfig;
+            dconfig.model_path = params.model_draft;
+            dconfig.n_gpu_layers = params.draft_n_gpu_layers;
+            dconfig.n_ctx = params.n_predict + 512;
+            draft_backend = std::make_unique<BackendLlama>(dconfig);
+            draft_sampler = SamplerLlama::create(
+                draft_backend->raw_vocab(),
+                draft_backend->n_vocab(),
+                params.sampling
+            );
+            strat = InitStrategy::DRAFT;
+        } catch (...) {
+            // Gracefully fallback to n-gram if draft fails to load
+        }
+    }
+
     InitGuesser guesser(
-        params.init_strategy,
+        strat,
         *tokenizer_,
         backend_->n_vocab(),
         params.sampling.seed,
         params.ngram_n,
-        params.ngram_pool_max
+        params.ngram_pool_max,
+        draft_backend.get(),
+        draft_sampler.get()
     );
 
     if (params.mode == DecodeMode::AR) {
