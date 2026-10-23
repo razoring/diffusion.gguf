@@ -53,12 +53,34 @@ struct SamplerParams {
     float mirostat_tau = 5.0f;
     float mirostat_eta = 0.1f;
 
+    // Logit bias (token_id -> bias value)
+    std::vector<std::pair<int32_t, float>> logit_bias;
+
+    // Additional samplers
+    float top_n_sigma = 0.0f;
+    float adaptive_p_target = -1.0f;
+    float adaptive_p_decay = 0.9f;
+    bool infill = false;
+
     // Grammar & constraints
     std::string grammar;
     std::string json_schema;
 
     uint32_t seed = 42;
     RngMode rng_mode = RngMode::POSITIONAL;
+};
+
+struct LogprobItem {
+    int32_t token = 0;
+    std::string piece;
+    float logprob = 0.0f;
+};
+
+struct TokenLogprobs {
+    int32_t token = 0;
+    std::string piece;
+    float logprob = 0.0f;
+    std::vector<LogprobItem> top_logprobs;
 };
 
 struct GenParams {
@@ -76,6 +98,27 @@ struct GenParams {
     int32_t draft_n_gpu_layers = 0;
     int32_t draft_n_predict = 4;
 
+    // Prompt cache options
+    std::string prompt_cache_path;
+    bool prompt_cache_ro = false;
+    bool prompt_cache_all = false;
+
+    // Context management
+    bool ctx_shift = true;
+    int32_t n_keep = 0;
+    int32_t n_discard = 0;
+
+    // Logprobs
+    bool logprobs = false;
+    int32_t top_logprobs = 0;
+
+    // Reasoning extraction (<think> ... </think>)
+    bool extract_reasoning = false;
+    int32_t reasoning_budget = 0;
+
+    // Multi-sequence slot id
+    int32_t seq_id = 0;
+
     std::vector<std::string> stop_strings;
     SamplerParams sampling;
 };
@@ -83,6 +126,8 @@ struct GenParams {
 struct GenResult {
     std::vector<int32_t> tokens;
     std::string text;
+    std::string reasoning_content;
+    std::vector<TokenLogprobs> token_logprobs;
     int iterations = 0;
     double tok_per_iter = 0.0;
     double tok_per_s = 0.0;
