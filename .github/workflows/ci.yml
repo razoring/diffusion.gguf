@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (${{ matrix.config }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            config: Release
+          - os: windows-latest
+            config: Release
+          - os: macos-latest
+            config: Release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure CMake
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }} --parallel
+
+      - name: Run Tests
+        run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure
+
+      - name: Verify CLI Version
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./build/bin/${{ matrix.config }}/diffusion-cli.exe --version
+          else
+            ./build/bin/diffusion-cli --version
+          fi
