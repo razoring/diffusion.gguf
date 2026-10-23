@@ -36,9 +36,17 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     }
 
     n_ctx_ = llama_n_ctx(ctx_);
+
+    // Pre-allocate persistent batch for zero-allocation decode loop
+    batch_ = llama_batch_init(config.n_batch, 0, 1);
+    batch_initialized_ = true;
 }
 
 BackendLlama::~BackendLlama() {
+    if (batch_initialized_) {
+        llama_batch_free(batch_);
+        batch_initialized_ = false;
+    }
     if (ctx_) {
         llama_free(ctx_);
         ctx_ = nullptr;
@@ -61,43 +69,32 @@ bool BackendLlama::supports_kv_truncate() const {
 LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_all) {
     if (n <= 0) return LogitsView{};
 
-    llama_batch batch = llama_batch_init(n, 0, 1);
     for (int i = 0; i < n; ++i) {
-        batch.token[i] = toks[i];
-        batch.pos[i] = pos0 + i;
-        batch.n_seq_id[i] = 1;
-        batch.seq_id[i][0] = 0;
-        batch.logits[i] = (want_all || i == n - 1);
+        batch_.token[i] = toks[i];
+        batch_.pos[i] = pos0 + i;
+        batch_.n_seq_id[i] = 1;
+        batch_.seq_id[i][0] = 0;
+        batch_.logits[i] = (want_all || i == n - 1);
     }
-    batch.n_tokens = n;
+    batch_.n_tokens = n;
 
-    if (llama_decode(ctx_, batch) != 0) {
-        llama_batch_free(batch);
+    if (llama_decode(ctx_, batch_) != 0) {
         throw std::runtime_error("llama_decode failed during evaluation");
     }
 
     if (want_all) {
-        logits_buf_.resize(static_cast<size_t>(n) * n_vocab_);
-        for (int i = 0; i < n; ++i) {
-            const float* row = llama_get_logits_ith(ctx_, i);
-            if (!row) {
-                llama_batch_free(batch);
-                throw std::runtime_error("Failed to get logits for batch index " + std::to_string(i));
-            }
-            std::memcpy(logits_buf_.data() + static_cast<size_t>(i) * n_vocab_, row, n_vocab_ * sizeof(float));
+        // llama_get_logits returns contiguous float array [n_outputs * n_vocab]
+        const float* logits = llama_get_logits(ctx_);
+        if (!logits) {
+            throw std::runtime_error("Failed to get output logits");
         }
-        llama_batch_free(batch);
-        return LogitsView{logits_buf_.data(), n_vocab_, n};
+        return LogitsView{logits, n_vocab_, n};
     } else {
-        logits_buf_.resize(n_vocab_);
         const float* row = llama_get_logits_ith(ctx_, n - 1);
         if (!row) {
-            llama_batch_free(batch);
             throw std::runtime_error("Failed to get logits for last token");
         }
-        std::memcpy(logits_buf_.data(), row, n_vocab_ * sizeof(float));
-        llama_batch_free(batch);
-        return LogitsView{logits_buf_.data(), n_vocab_, 1};
+        return LogitsView{row, n_vocab_, 1};
     }
 }
 

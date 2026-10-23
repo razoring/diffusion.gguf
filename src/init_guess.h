@@ -7,6 +7,8 @@
 #include <random>
 #include <vector>
 
+#include "context_trie.h"
+
 namespace diffusion {
 
 class NgramPool {
@@ -20,7 +22,7 @@ private:
     int n_ = 3;
     int max_entries_ = 4096;
     // Map prefix hash -> list of follow tokens
-    std::map<uint64_t, std::vector<int32_t>> table_;
+    std::unordered_map<uint64_t, std::vector<int32_t>> table_;
 
     uint64_t hash_prefix(const int32_t* toks, int len) const;
 };
@@ -49,6 +51,7 @@ private:
     int32_t n_vocab_;
     std::mt19937 rng_;
     NgramPool ngram_pool_;
+    ContextTrie context_trie_;
 };
 
 } // namespace diffusion

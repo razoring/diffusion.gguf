@@ -36,7 +36,9 @@ std::unique_ptr<ISamplerChain> SamplerLlama::clone() const {
             }
         }
     }
-    return std::make_unique<SamplerLlama>(cloned, vocab_, cloned_pos);
+    auto result = std::make_unique<SamplerLlama>(cloned, vocab_, cloned_pos);
+    result->set_pure_greedy(is_pure_greedy_);
+    return result;
 }
 
 void SamplerLlama::accept(int32_t tok) {
@@ -52,6 +54,20 @@ bool SamplerLlama::can_accept(int32_t /*tok*/) const {
 
 int32_t SamplerLlama::sample(const float* logits, int abs_pos, float* out_prob) {
     if (!chain_ || !logits) return 0;
+
+    // Fast-path: Pure greedy decoding directly searches maximum logit
+    if (is_pure_greedy_ && n_vocab_ > 0) {
+        int32_t best_id = 0;
+        float max_val = logits[0];
+        for (int32_t i = 1; i < n_vocab_; ++i) {
+            if (logits[i] > max_val) {
+                max_val = logits[i];
+                best_id = i;
+            }
+        }
+        if (out_prob) *out_prob = 1.0f;
+        return best_id;
+    }
 
     if (pos_sampler_) {
         llama_sampler_dist_positional_set_pos(pos_sampler_, abs_pos);
@@ -189,12 +205,20 @@ std::unique_ptr<SamplerLlama> SamplerLlama::create(
         ));
     } else if (params.rng_mode == RngMode::POSITIONAL) {
         pos_sampler = llama_sampler_init_dist_positional(params.seed);
-        llama_sampler_chain_add(chain, pos_sampler);
     } else {
         llama_sampler_chain_add(chain, llama_sampler_init_dist(params.seed));
     }
 
-    return std::make_unique<SamplerLlama>(chain, vocab, pos_sampler);
+    bool is_pure_greedy = (params.temp <= 0.0f) &&
+                           params.grammar.empty() &&
+                           (params.repeat_penalty == 1.0f) &&
+                           (params.presence_penalty == 0.0f) &&
+                           (params.frequency_penalty == 0.0f) &&
+                           (params.dry_multiplier <= 0.0f);
+
+    auto result = std::make_unique<SamplerLlama>(chain, vocab, pos_sampler);
+    result->set_pure_greedy(is_pure_greedy);
+    return result;
 }
 
 } // namespace diffusion

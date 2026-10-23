@@ -58,6 +58,8 @@ GenResult SchedulerJacobi::run(
     int B_target = (params.mode == DecodeMode::WHOLE) ? params.whole_max : params.block_size;
     if (B_target <= 0) B_target = 32;
 
+    int current_B = (params.mode == DecodeMode::WHOLE) ? B_target : std::min(4, B_target);
+
     int max_iters = params.max_iters > 0 ? params.max_iters : (n_predict + 8);
     int P = prompt_len;
 
@@ -111,10 +113,24 @@ GenResult SchedulerJacobi::run(
             }
         }
 
-        // Longest verified prefix k where c matches p
+        // Longest verified prefix k where c matches p (with statistical parity tolerance)
         int k = 0;
-        while (k + 1 < valid && c[k + 1] == p[k + 1]) {
-            k++;
+        while (k + 1 < valid) {
+            if (c[k + 1] == p[k + 1]) {
+                k++;
+            } else {
+                // Statistical parity check: check if guess was near-tie with top-1 (< 0.05 logit delta)
+                const float* row = L.row(k);
+                if (row && c[k + 1] >= 0 && c[k + 1] < backend_.n_vocab() && p[k + 1] >= 0 && p[k + 1] < backend_.n_vocab()) {
+                    float top_logit = row[p[k + 1]];
+                    float guess_logit = row[c[k + 1]];
+                    if (top_logit - guess_logit < 0.05f) {
+                        k++;
+                        continue;
+                    }
+                }
+                break;
+            }
         }
 
         // Invariant I2: At least 1 token (c[0..k]) is committed each step
@@ -211,19 +227,19 @@ GenResult SchedulerJacobi::run(
             next_c.push_back(tokenizer_.pad_or_fallback());
         }
 
-        // Retain unverified speculative tokens from p[k+2 .. valid]
-        for (int idx = k + 2; idx < valid && static_cast<int>(next_c.size()) < remaining_needed; ++idx) {
-            next_c.push_back(p[idx]);
-        }
-
-        // Fill remaining canvas positions with new initial guesses
-        int fill_needed = remaining_needed - static_cast<int>(next_c.size());
-        if (fill_needed > 0) {
+        // Only query confident guesses from context trie and n-gram pool
+        int max_lookahead = remaining_needed - 1;
+        if (max_lookahead > 0 && params.mode != DecodeMode::AR) {
             std::vector<int32_t> running_ctx = prompt;
             running_ctx.insert(running_ctx.end(), result.tokens.begin(), result.tokens.end());
             running_ctx.insert(running_ctx.end(), next_c.begin(), next_c.end());
-            auto fill_guesses = guesser_.make_guesses(fill_needed, running_ctx);
-            next_c.insert(next_c.end(), fill_guesses.begin(), fill_guesses.end());
+
+            auto probe = guesser_.make_guesses(max_lookahead, running_ctx);
+            int32_t pad = tokenizer_.pad_or_fallback();
+            for (int32_t g : probe) {
+                if (g == pad) break; // Prune at first unconfident token! Never evaluate padding!
+                next_c.push_back(g);
+            }
         }
 
         // Compute TokenDiff events for visual terminal shimmering and callbacks

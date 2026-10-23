@@ -40,7 +40,8 @@ private:
     llama_context* ctx_ = nullptr;
     int n_vocab_ = 0;
     int n_ctx_ = 0;
-    std::vector<float> logits_buf_;
+    llama_batch batch_{};
+    bool batch_initialized_ = false;
 };
 
 } // namespace diffusion
