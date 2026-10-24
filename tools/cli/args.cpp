@@ -260,6 +260,15 @@ CliArgs parse_cli_args(int argc, char** argv) {
             } else {
                 args.params.mode = DecodeMode::BLOCK;
             }
+        } else if (arg == "--speculative") {
+            args.params.block_size = next_int("--speculative");
+        } else if (arg == "-sm" || arg == "--split-mode") {
+            std::string sm = next_str("-sm/--split-mode");
+            if (sm == "none") args.backend.split_mode = 0;
+            else if (sm == "row") args.backend.split_mode = 2;
+            else args.backend.split_mode = 1;
+        } else if (arg == "-ts" || arg == "--tensor-split") {
+            args.backend.tensor_split_str = next_str("-ts/--tensor-split");
         } else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
             args.params.block_size = next_int("--block/--block-size");
         } else if (arg == "--whole-max") {

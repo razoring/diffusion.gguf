@@ -547,7 +547,7 @@ public:
         }
     }
 
-    ServerSlot* acquire_slot(int timeout_ms = 10000) {
+    ServerSlot* acquire_slot(int timeout_ms = 300000) {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         while (std::chrono::steady_clock::now() < deadline) {
             for (auto& s : slots_) {
@@ -688,7 +688,20 @@ static ServerConfig parse_server_args(int argc, char** argv) {
             if (m == "ar") throw std::runtime_error("Autoregressive mode ('ar') has been completely removed. diffusion.gguf only supports diffusion generation ('block' or 'whole').");
             else if (m == "whole") cfg.default_params.mode = DecodeMode::WHOLE;
             else cfg.default_params.mode = DecodeMode::BLOCK;
-        } else if (arg == "-n" || arg == "--n-predict") cfg.default_params.n_predict = next_int("-n/--n-predict");
+        }
+        else if (arg == "-sm" || arg == "--split-mode") {
+            std::string sm = next_str("-sm/--split-mode");
+            if (sm == "none") cfg.backend.split_mode = 0;
+            else if (sm == "row") cfg.backend.split_mode = 2;
+            else cfg.backend.split_mode = 1; // layer
+        }
+        else if (arg == "-ts" || arg == "--tensor-split") cfg.backend.tensor_split_str = next_str("-ts/--tensor-split");
+        else if (arg == "--main-gpu") cfg.backend.main_gpu = next_int("--main-gpu");
+        else if (arg == "--speculative") {
+            // Experimental opt-in for speculative block size
+            cfg.default_params.block_size = next_int("--speculative");
+        }
+        else if (arg == "-n" || arg == "--n-predict") cfg.default_params.n_predict = next_int("-n/--n-predict");
         else if (arg == "--block") cfg.default_params.block_size = next_int("--block");
         else if (arg == "--whole-max") cfg.default_params.whole_max = next_int("--whole-max");
         else if (arg == "--init") {

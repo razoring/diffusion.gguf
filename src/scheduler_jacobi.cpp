@@ -133,10 +133,10 @@ GenResult SchedulerJacobi::run(
             }
         }
 
-        // Batched parallel evaluation of all B canvas tokens
-        LogitsView L = backend_.eval(c.data(), B, P, true, params.seq_id);
+        // Parallel evaluation of B canvas tokens (only requests all logits when B > 1)
+        LogitsView L = backend_.eval(c.data(), B, P, (B > 1), params.seq_id);
 
-        // Lazy speculative verification: sample slot i+1 only if slot i is accepted!
+        // Sample position 0: predicts next token p[1]
         auto st = sampler_.clone();
         st->accept(c[0]);
 
@@ -149,20 +149,9 @@ GenResult SchedulerJacobi::run(
         // Sample position 0: predicts next token p[1]
         p[1] = st->sample(L.row(0), P + 1, &conf[1]);
 
-        // Lazily verify downstream slots
+        // Lazily verify downstream slots (strictly exact token match)
         for (int i = 0; i + 1 < B; ++i) {
             bool matched = (c[i + 1] == p[i + 1]);
-            if (!matched && L.row(i)) {
-                const float* row = L.row(i);
-                int32_t guess = c[i + 1];
-                int32_t top = p[i + 1];
-                if (guess >= 0 && guess < backend_.n_vocab() && top >= 0 && top < backend_.n_vocab()) {
-                    if (row[top] - row[guess] < 0.35f) {
-                        matched = true;
-                    }
-                }
-            }
-
             if (!matched || !st->can_accept(c[i + 1])) {
                 break;
             }

@@ -85,7 +85,7 @@ struct TokenLogprobs {
 struct GenParams {
     int32_t n_predict = 128;
     DecodeMode mode = DecodeMode::BLOCK;
-    int32_t block_size = 2;
+    int32_t block_size = 1; // 1 = exact standard single-token decode; >1 requires explicit speculative opt-in
     int32_t whole_max = 512;
     InitStrategy init_strategy = InitStrategy::NGRAM;
     int32_t ngram_n = 3;
