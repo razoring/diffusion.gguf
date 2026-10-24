@@ -239,7 +239,7 @@ void BackendLlama::kv_truncate(int pos, int32_t seq_id) {
 void BackendLlama::kv_clear(int32_t seq_id) {
     if (!ctx_) return;
     llama_memory_t mem = llama_get_memory(ctx_);
-    if (seq_id < 0 || (model_ && (llama_model_is_hybrid(model_) || llama_model_is_recurrent(model_)))) {
+    if (seq_id < 0) {
         llama_memory_clear(mem, true);
     } else {
         llama_memory_seq_rm(mem, seq_id, 0, -1);

@@ -1337,8 +1337,12 @@ int main(int argc, char** argv) {
                         return sink.is_writable();
                     };
 
-                    diffusion::GenResult result = engine->generate(prompt, params, callback);
-                    engine->backend().kv_clear(slot->id);
+                    diffusion::GenResult result;
+                    {
+                        std::lock_guard<std::mutex> lock(engine_mutex);
+                        result = engine->generate(prompt, params, callback);
+                        engine->backend().kv_clear(slot->id);
+                    }
                     slot_manager.release_slot(slot);
 
                     metrics.total_completion_tokens += result.tokens.size();
@@ -1459,7 +1463,7 @@ int main(int argc, char** argv) {
         diffusion::GenParams params = diffusion::parse_request_params(body, config.default_params);
         bool stream = body.value("stream", false);
 
-        auto* slot = slot_manager.acquire_slot(10000);
+        auto* slot = slot_manager.acquire_slot(300000);
         if (!slot) {
             res.status = 503;
             res.set_content(R"({"error":{"message":"All concurrency slots busy"}})", "application/json");

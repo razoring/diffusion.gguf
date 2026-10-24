@@ -15,7 +15,7 @@ struct BackendConfig {
     int32_t n_gpu_layers = 0;
     int32_t n_threads = 4;
     bool flash_attn = false;
-    bool swa_full = true;
+    bool swa_full = false;
 
     // Multi-GPU options
     int32_t split_mode = 1; // 0=none, 1=layer (default), 2=row
