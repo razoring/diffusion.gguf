@@ -18,6 +18,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -26,6 +27,428 @@
 using json = nlohmann::json;
 
 namespace diffusion {
+
+inline bool parse_tool_call(const std::string& raw, std::string& name, std::string& args_json) {
+    std::string s = raw;
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\n' || s.front() == '\r' || s.front() == '\t')) s.erase(0, 1);
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\n' || s.back() == '\r' || s.back() == '\t')) s.pop_back();
+
+    // 1. JSON format: {"name": ..., "arguments": ...}
+    if (s.rfind("{\"", 0) == 0 || s.rfind("{\n", 0) == 0 || s.rfind("{ ", 0) == 0) {
+        try {
+            json j = json::parse(s);
+            if (j.contains("name")) {
+                name = j["name"].get<std::string>();
+                if (j.contains("arguments")) {
+                    if (j["arguments"].is_string()) args_json = j["arguments"].get<std::string>();
+                    else args_json = j["arguments"].dump();
+                } else {
+                    args_json = "{}";
+                }
+                return true;
+            }
+        } catch (...) {}
+    }
+
+    // 2. XML format:
+    // <function=glob>
+    // <parameter=pattern>
+    // **/todo.py
+    // </parameter>
+    // </function>
+    size_t fn_tag = s.find("<function=");
+    size_t fn_prefix_len = 10;
+    if (fn_tag == std::string::npos) {
+        fn_tag = s.find("<function name=\"");
+        fn_prefix_len = 16;
+    }
+    if (fn_tag != std::string::npos) {
+        size_t name_start = fn_tag + fn_prefix_len;
+        size_t name_end = s.find_first_of("\">\r\n ", name_start);
+        if (name_end != std::string::npos) {
+            name = s.substr(name_start, name_end - name_start);
+
+            json j_args = json::object();
+            size_t p_pos = name_end;
+            while (p_pos < s.size()) {
+                size_t param_tag = s.find("<parameter=", p_pos);
+                size_t prefix_len = 11;
+                if (param_tag == std::string::npos) {
+                    param_tag = s.find("<parameter name=\"", p_pos);
+                    prefix_len = 17;
+                }
+                if (param_tag == std::string::npos) break;
+
+                size_t p_name_start = param_tag + prefix_len;
+                size_t p_name_end = s.find_first_of("\">\r\n ", p_name_start);
+                if (p_name_end == std::string::npos) break;
+                std::string p_name = s.substr(p_name_start, p_name_end - p_name_start);
+
+                size_t tag_close = s.find('>', p_name_end);
+                if (tag_close == std::string::npos) break;
+                size_t val_start = tag_close + 1;
+
+                size_t val_end = s.find("</parameter>", val_start);
+                if (val_end == std::string::npos) val_end = s.find("</function>", val_start);
+                if (val_end == std::string::npos) val_end = s.size();
+
+                std::string val = s.substr(val_start, val_end - val_start);
+                while (!val.empty() && (val.front() == '\n' || val.front() == '\r')) val.erase(0, 1);
+                while (!val.empty() && (val.back() == '\n' || val.back() == '\r')) val.pop_back();
+
+                try {
+                    j_args[p_name] = json::parse(val);
+                } catch (...) {
+                    j_args[p_name] = val;
+                }
+
+                p_pos = val_end + (s.substr(val_end, 12) == "</parameter>" ? 12 : 0);
+            }
+
+            args_json = j_args.dump();
+            std::cout << "[Tool Parsed XML] fn=" << name << " args=" << args_json << "\n";
+            std::cout.flush();
+            return true;
+        }
+    }
+
+    // 3. Gemma format: call:func_name{...}
+    size_t call_pos = s.find("call:");
+    if (call_pos != std::string::npos) {
+        size_t name_start = call_pos + 5;
+        while (name_start < s.size() && (s[name_start] == ' ' || s[name_start] == '\t')) name_start++;
+
+        size_t brace = s.find('{', name_start);
+        if (brace != std::string::npos) {
+            name = s.substr(name_start, brace - name_start);
+            while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+
+            size_t end_brace = s.rfind('}');
+            std::string body;
+            if (end_brace != std::string::npos && end_brace > brace) {
+                body = s.substr(brace, end_brace - brace + 1);
+            } else {
+                body = s.substr(brace) + "}";
+            }
+
+            size_t q_pos = 0;
+            while ((q_pos = body.find("<|\"|>", q_pos)) != std::string::npos) {
+                body.replace(q_pos, 5, "\"");
+                q_pos += 1;
+            }
+
+            size_t tq = 0;
+            while ((tq = body.find("\"\"\"", tq)) != std::string::npos) {
+                size_t tq_end = body.find("\"\"\"", tq + 3);
+                if (tq_end != std::string::npos) {
+                    std::string inner = body.substr(tq + 3, tq_end - (tq + 3));
+                    json j_inner = inner;
+                    std::string escaped = j_inner.dump();
+                    body.replace(tq, (tq_end + 3) - tq, escaped);
+                    tq += escaped.size();
+                } else {
+                    break;
+                }
+            }
+
+            std::regex key_regex("([{\\s,])([a-zA-Z_][a-zA-Z0-9_]*)\\s*:");
+            body = std::regex_replace(body, key_regex, "$1\"$2\":");
+            body = std::regex_replace(body, std::regex("\\bTrue\\b"), "true");
+            body = std::regex_replace(body, std::regex("\\bFalse\\b"), "false");
+            body = std::regex_replace(body, std::regex("\\bNone\\b"), "null");
+
+            try {
+                json j = json::parse(body);
+                args_json = j.dump();
+                std::cout << "[Tool Parsed Gemma] fn=" << name << " args=" << args_json << "\n";
+                std::cout.flush();
+                return true;
+            } catch (...) {
+                json fallback = {{"raw", body}};
+                args_json = fallback.dump();
+                std::cout << "[Tool Parsed Fallback] fn=" << name << " args=" << args_json << "\n";
+                std::cout.flush();
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+inline bool prompt_ends_with_thinking(const std::string& prompt) {
+    std::string s = prompt;
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\n' || s.back() == '\r' || s.back() == '\t')) {
+        s.pop_back();
+    }
+    static const std::string_view think_tails[] = {
+        "<think>",
+        "<|think|>",
+        "<|channel>thought",
+        "<channel>thought"
+    };
+    for (const auto& tail : think_tails) {
+        if (s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct StreamFilter {
+    bool in_thinking = false;
+    bool in_tool_call = false;
+    std::string tool_call_buf;
+    std::string carry_buf_;
+    bool had_tool_call = false;
+
+    struct OutputItem {
+        enum Type { CONTENT, REASONING, TOOL_CALL } type;
+        std::string text;
+        std::string fn_name;
+        std::string fn_args;
+    };
+
+    static bool is_potential_tag_prefix(const std::string& s) {
+        static const std::string_view all_tags[] = {
+            "<|im_end|>\n",
+            "<|im_end|>",
+            "<|endoftext|>\n",
+            "<|endoftext|>",
+            "<end_of_turn>\n",
+            "<end_of_turn>",
+            "<|channel>thought\n",
+            "<|channel>thought",
+            "<channel>thought\n",
+            "<channel>thought",
+            "<think>\n",
+            "<think>",
+            "<|tool_call>call:",
+            "<|tool_call>",
+            "<tool_call>",
+            "<tool_call|>",
+            "</tool_call>",
+            "<|tool_response>",
+            "<tool_response>",
+            "|tool_response>",
+            "<channel|>\n",
+            "<channel|>",
+            "</channel>\n",
+            "</channel>",
+            "<|channel|>\n",
+            "<|channel|>",
+            "</think>\n",
+            "</think>"
+        };
+        for (const auto& t : all_tags) {
+            if (t.rfind(s, 0) == 0) return true;
+        }
+        return false;
+    }
+
+    std::vector<OutputItem> process(std::string chunk, bool is_done) {
+        std::vector<OutputItem> out;
+        std::string text = carry_buf_ + chunk;
+        carry_buf_.clear();
+
+        if (!is_done) {
+            size_t last_bracket = text.rfind('<');
+            if (last_bracket != std::string::npos && (text.size() - last_bracket) <= 25) {
+                std::string candidate = text.substr(last_bracket);
+                if (is_potential_tag_prefix(candidate)) {
+                    carry_buf_ = candidate;
+                    text.erase(last_bracket);
+                }
+            }
+        }
+
+        while (!text.empty()) {
+            if (in_thinking) {
+                size_t end_pos = std::string::npos;
+                size_t end_len = 0;
+                static const std::string_view think_ends[] = {
+                    "<channel|>\n",
+                    "<channel|>",
+                    "</channel>\n",
+                    "</channel>",
+                    "<|channel|>\n",
+                    "<|channel|>",
+                    "</think>\n",
+                    "</think>"
+                };
+                for (const auto& te : think_ends) {
+                    size_t pos = text.find(te);
+                    if (pos != std::string::npos && (end_pos == std::string::npos || pos < end_pos)) {
+                        end_pos = pos;
+                        end_len = te.size();
+                    }
+                }
+
+                if (end_pos != std::string::npos) {
+                    if (end_pos > 0) {
+                        out.push_back({OutputItem::REASONING, text.substr(0, end_pos), "", ""});
+                    }
+                    in_thinking = false;
+                    text.erase(0, end_pos + end_len);
+                } else {
+                    size_t eog_pos = text.find("<|im_end|>");
+                    if (eog_pos == std::string::npos) eog_pos = text.find("<|endoftext|>");
+                    if (eog_pos == std::string::npos) eog_pos = text.find("<end_of_turn>");
+                    if (eog_pos != std::string::npos) {
+                        if (eog_pos > 0) {
+                            out.push_back({OutputItem::REASONING, text.substr(0, eog_pos), "", ""});
+                        }
+                        in_thinking = false;
+                        text.clear();
+                        break;
+                    }
+                    out.push_back({OutputItem::REASONING, text, "", ""});
+                    text.clear();
+                }
+            } else if (in_tool_call) {
+                size_t end_pos = std::string::npos;
+                size_t end_len = 0;
+                static const std::string_view tool_ends[] = {
+                    "<tool_call|>",
+                    "</tool_call>",
+                    "<|tool_response>",
+                    "<tool_response>"
+                };
+                for (const auto& te : tool_ends) {
+                    size_t pos = text.find(te);
+                    if (pos != std::string::npos && (end_pos == std::string::npos || pos < end_pos)) {
+                        end_pos = pos;
+                        end_len = te.size();
+                    }
+                }
+
+                if (end_pos != std::string::npos) {
+                    tool_call_buf += text.substr(0, end_pos);
+                    in_tool_call = false;
+                    text.erase(0, end_pos + end_len);
+
+                    std::string fn_name, fn_args;
+                    if (parse_tool_call(tool_call_buf, fn_name, fn_args)) {
+                        had_tool_call = true;
+                        out.push_back({OutputItem::TOOL_CALL, "", fn_name, fn_args});
+                    }
+                    tool_call_buf.clear();
+                } else {
+                    tool_call_buf += text;
+                    text.clear();
+                }
+            } else {
+                size_t eog_pos = text.find("<|im_end|>");
+                if (eog_pos == std::string::npos) eog_pos = text.find("<|endoftext|>");
+                if (eog_pos == std::string::npos) eog_pos = text.find("<end_of_turn>");
+
+                size_t resp_pos = text.find("<|tool_response>");
+                if (resp_pos == std::string::npos) resp_pos = text.find("<tool_response>");
+                if (resp_pos == std::string::npos) resp_pos = text.find("|tool_response>");
+
+                size_t tool_pos = std::string::npos;
+                size_t tool_len = 0;
+                std::string_view matched_tool_start;
+                static const std::string_view tool_starts[] = {
+                    "<|tool_call>call:",
+                    "<|tool_call>",
+                    "<tool_call>"
+                };
+                for (const auto& ts : tool_starts) {
+                    size_t pos = text.find(ts);
+                    if (pos != std::string::npos && (tool_pos == std::string::npos || pos < tool_pos)) {
+                        tool_pos = pos;
+                        tool_len = ts.size();
+                        matched_tool_start = ts;
+                    }
+                }
+
+                size_t think_pos = std::string::npos;
+                size_t think_len = 0;
+                static const std::string_view think_starts[] = {
+                    "<|channel>thought\n",
+                    "<|channel>thought",
+                    "<channel>thought\n",
+                    "<channel>thought",
+                    "<think>\n",
+                    "<think>"
+                };
+                for (const auto& ts : think_starts) {
+                    size_t pos = text.find(ts);
+                    if (pos != std::string::npos && (think_pos == std::string::npos || pos < think_pos)) {
+                        think_pos = pos;
+                        think_len = ts.size();
+                    }
+                }
+
+                size_t earliest = std::string::npos;
+                enum NextAction { ACTION_NONE, ACTION_EOG, ACTION_RESP, ACTION_TOOL, ACTION_THINK } action = ACTION_NONE;
+
+                if (eog_pos != std::string::npos && (earliest == std::string::npos || eog_pos < earliest)) {
+                    earliest = eog_pos;
+                    action = ACTION_EOG;
+                }
+                if (resp_pos != std::string::npos && (earliest == std::string::npos || resp_pos < earliest)) {
+                    earliest = resp_pos;
+                    action = ACTION_RESP;
+                }
+                if (tool_pos != std::string::npos && (earliest == std::string::npos || tool_pos < earliest)) {
+                    earliest = tool_pos;
+                    action = ACTION_TOOL;
+                }
+                if (think_pos != std::string::npos && (earliest == std::string::npos || think_pos < earliest)) {
+                    earliest = think_pos;
+                    action = ACTION_THINK;
+                }
+
+                if (action == ACTION_NONE) {
+                    out.push_back({OutputItem::CONTENT, text, "", ""});
+                    text.clear();
+                } else if (action == ACTION_EOG) {
+                    if (eog_pos > 0) {
+                        out.push_back({OutputItem::CONTENT, text.substr(0, eog_pos), "", ""});
+                    }
+                    text.clear();
+                    break;
+                } else if (action == ACTION_RESP) {
+                    if (resp_pos > 0) {
+                        out.push_back({OutputItem::CONTENT, text.substr(0, resp_pos), "", ""});
+                    }
+                    text.clear();
+                    break;
+                } else if (action == ACTION_TOOL) {
+                    if (tool_pos > 0) {
+                        out.push_back({OutputItem::CONTENT, text.substr(0, tool_pos), "", ""});
+                    }
+                    in_tool_call = true;
+                    tool_call_buf.clear();
+                    if (matched_tool_start == "<|tool_call>call:") {
+                        tool_call_buf = "call:";
+                    }
+                    text.erase(0, tool_pos + tool_len);
+                } else if (action == ACTION_THINK) {
+                    if (think_pos > 0) {
+                        out.push_back({OutputItem::CONTENT, text.substr(0, think_pos), "", ""});
+                    }
+                    in_thinking = true;
+                    text.erase(0, think_pos + think_len);
+                }
+            }
+        }
+
+        if (is_done && in_tool_call && !tool_call_buf.empty()) {
+            std::string fn_name, fn_args;
+            if (parse_tool_call(tool_call_buf, fn_name, fn_args)) {
+                had_tool_call = true;
+                out.push_back({OutputItem::TOOL_CALL, "", fn_name, fn_args});
+            }
+            tool_call_buf.clear();
+            in_tool_call = false;
+        }
+
+        return out;
+    }
+};
 
 struct ServerConfig {
     BackendConfig backend;
@@ -276,19 +699,19 @@ static json format_logprobs_json(const std::vector<TokenLogprobs>& tlp) {
 static GenParams parse_request_params(const json& body, const GenParams& default_params) {
     GenParams params = default_params;
 
-    if (body.contains("max_tokens")) params.n_predict = body["max_tokens"].get<int>();
-    else if (body.contains("n_predict")) params.n_predict = body["n_predict"].get<int>();
+    if (body.contains("max_tokens") && body["max_tokens"].is_number_integer()) params.n_predict = body["max_tokens"].get<int>();
+    else if (body.contains("n_predict") && body["n_predict"].is_number_integer()) params.n_predict = body["n_predict"].get<int>();
 
-    if (body.contains("temperature")) params.sampling.temp = body["temperature"].get<float>();
-    if (body.contains("top_p")) params.sampling.top_p = body["top_p"].get<float>();
-    if (body.contains("top_k")) params.sampling.top_k = body["top_k"].get<int>();
-    if (body.contains("min_p")) params.sampling.min_p = body["min_p"].get<float>();
-    if (body.contains("typical_p")) params.sampling.typical_p = body["typical_p"].get<float>();
-    if (body.contains("presence_penalty")) params.sampling.presence_penalty = body["presence_penalty"].get<float>();
-    if (body.contains("frequency_penalty")) params.sampling.frequency_penalty = body["frequency_penalty"].get<float>();
-    if (body.contains("repeat_penalty")) params.sampling.repeat_penalty = body["repeat_penalty"].get<float>();
-    if (body.contains("repeat_last_n")) params.sampling.repeat_last_n = body["repeat_last_n"].get<int>();
-    if (body.contains("seed")) params.sampling.seed = body["seed"].get<uint32_t>();
+    if (body.contains("temperature") && body["temperature"].is_number()) params.sampling.temp = body["temperature"].get<float>();
+    if (body.contains("top_p") && body["top_p"].is_number()) params.sampling.top_p = body["top_p"].get<float>();
+    if (body.contains("top_k") && body["top_k"].is_number_integer()) params.sampling.top_k = body["top_k"].get<int>();
+    if (body.contains("min_p") && body["min_p"].is_number()) params.sampling.min_p = body["min_p"].get<float>();
+    if (body.contains("typical_p") && body["typical_p"].is_number()) params.sampling.typical_p = body["typical_p"].get<float>();
+    if (body.contains("presence_penalty") && body["presence_penalty"].is_number()) params.sampling.presence_penalty = body["presence_penalty"].get<float>();
+    if (body.contains("frequency_penalty") && body["frequency_penalty"].is_number()) params.sampling.frequency_penalty = body["frequency_penalty"].get<float>();
+    if (body.contains("repeat_penalty") && body["repeat_penalty"].is_number()) params.sampling.repeat_penalty = body["repeat_penalty"].get<float>();
+    if (body.contains("repeat_last_n") && body["repeat_last_n"].is_number_integer()) params.sampling.repeat_last_n = body["repeat_last_n"].get<int>();
+    if (body.contains("seed") && body["seed"].is_number_unsigned()) params.sampling.seed = body["seed"].get<uint32_t>();
 
     // Logprobs
     if (body.contains("logprobs")) {
@@ -340,6 +763,16 @@ static GenParams parse_request_params(const json& body, const GenParams& default
             for (const auto& s : body["stop"]) {
                 if (s.is_string()) params.stop_strings.push_back(s.get<std::string>());
             }
+        }
+    }
+    static const std::string default_stops[] = {
+        "<|im_end|>",
+        "<|endoftext|>",
+        "<end_of_turn>"
+    };
+    for (const auto& ds : default_stops) {
+        if (std::find(params.stop_strings.begin(), params.stop_strings.end(), ds) == params.stop_strings.end()) {
+            params.stop_strings.push_back(ds);
         }
     }
 
@@ -413,13 +846,29 @@ int main(int argc, char** argv) {
     diffusion::SlotManager slot_manager(config.n_parallel);
     diffusion::ServerMetrics metrics;
 
+    svr.set_exception_handler([](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
+        try {
+            if (ep) std::rethrow_exception(ep);
+        } catch (const std::exception& e) {
+            std::cerr << "[Server Error] " << req.path << ": " << e.what() << "\n";
+            json err = {{"error", {{"message", e.what()}, {"type", "internal_server_error"}}}};
+            res.status = 500;
+            res.set_content(err.dump(), "application/json");
+        } catch (...) {
+            std::cerr << "[Server Error] " << req.path << ": unknown exception\n";
+            json err = {{"error", {{"message", "Unknown internal server error"}, {"type", "internal_server_error"}}}};
+            res.status = 500;
+            res.set_content(err.dump(), "application/json");
+        }
+    });
+
     // Health check
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(R"({"status":"ok"})", "application/json");
     });
 
     // Model list
-    svr.Get("/v1/models", [&](const httplib::Request& req, httplib::Response& res) {
+    auto models_handler = [&](const httplib::Request& req, httplib::Response& res) {
         if (!diffusion::check_auth(req, config.api_key, res)) return;
         json resp = {
             {"object", "list"},
@@ -433,7 +882,9 @@ int main(int argc, char** argv) {
             })}
         };
         res.set_content(resp.dump(), "application/json");
-    });
+    };
+    svr.Get("/v1/models", models_handler);
+    svr.Get("/models", models_handler);
 
     // Slots status (GET /slots)
     svr.Get("/slots", [&](const httplib::Request& req, httplib::Response& res) {
@@ -824,7 +1275,7 @@ int main(int argc, char** argv) {
     });
 
     // POST /v1/chat/completions
-    svr.Post("/v1/chat/completions", [&](const httplib::Request& req, httplib::Response& res) {
+    auto chat_handler = [&](const httplib::Request& req, httplib::Response& res) {
         if (!diffusion::check_auth(req, config.api_key, res)) return;
 
         json body;
@@ -836,22 +1287,80 @@ int main(int argc, char** argv) {
             return;
         }
 
+        std::cout << "[Request Keys] ";
+        for (auto& el : body.items()) {
+            std::cout << el.key() << " ";
+        }
+        std::cout << "\n";
+        std::cout.flush();
+
+        std::vector<diffusion::ToolDef> tool_defs;
+        if (body.contains("tools") && body["tools"].is_array()) {
+            for (const auto& t : body["tools"]) {
+                if (!t.is_object()) continue;
+                std::string type = t.value("type", "function");
+                if (type == "function" && t.contains("function") && t["function"].is_object()) {
+                    auto fn = t["function"];
+                    diffusion::ToolDef td;
+                    td.name = fn.value("name", "");
+                    td.description = fn.value("description", "");
+                    if (fn.contains("parameters")) {
+                        if (fn["parameters"].is_string()) td.parameters = fn["parameters"].get<std::string>();
+                        else td.parameters = fn["parameters"].dump();
+                    }
+                    tool_defs.push_back(std::move(td));
+                }
+            }
+        }
+
         std::vector<diffusion::ChatMsg> msgs;
         if (body.contains("messages") && body["messages"].is_array()) {
             for (const auto& m : body["messages"]) {
-                if (m.is_object() && m.contains("role") && m.contains("content")) {
-                    msgs.push_back(diffusion::ChatMsg{
-                        m["role"].get<std::string>(),
-                        m["content"].get<std::string>()
-                    });
+                if (!m.is_object() || !m.contains("role")) continue;
+                diffusion::ChatMsg msg;
+                msg.role = m.value("role", "user");
+                if (m.contains("content")) {
+                    if (m["content"].is_string()) {
+                        msg.content = m["content"].get<std::string>();
+                    } else if (m["content"].is_array()) {
+                        for (const auto& part : m["content"]) {
+                            if (part.is_string()) {
+                                msg.content += part.get<std::string>();
+                            } else if (part.is_object() && part.contains("text") && part["text"].is_string()) {
+                                msg.content += part["text"].get<std::string>();
+                            }
+                        }
+                    }
                 }
+                if (m.contains("reasoning_content") && m["reasoning_content"].is_string()) {
+                    msg.reasoning_content = m["reasoning_content"].get<std::string>();
+                }
+                if (m.contains("tool_call_id") && m["tool_call_id"].is_string()) {
+                    msg.tool_call_id = m["tool_call_id"].get<std::string>();
+                }
+                if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+                    for (const auto& tc : m["tool_calls"]) {
+                        if (!tc.is_object()) continue;
+                        diffusion::ToolCall call;
+                        call.id = tc.value("id", "");
+                        if (tc.contains("function") && tc["function"].is_object()) {
+                            call.name = tc["function"].value("name", "");
+                            if (tc["function"].contains("arguments")) {
+                                if (tc["function"]["arguments"].is_string()) call.arguments = tc["function"]["arguments"].get<std::string>();
+                                else call.arguments = tc["function"]["arguments"].dump();
+                            }
+                        }
+                        msg.tool_calls.push_back(std::move(call));
+                    }
+                }
+                msgs.push_back(std::move(msg));
             }
         }
         if (msgs.empty()) {
             msgs.push_back(diffusion::ChatMsg{"user", "Hello"});
         }
 
-        std::string prompt = engine->chat_formatter().apply(msgs, true);
+        std::string prompt = engine->chat_formatter().apply(msgs, tool_defs, true);
         diffusion::GenParams params = diffusion::parse_request_params(body, config.default_params);
         bool stream = body.value("stream", false);
 
@@ -878,15 +1387,43 @@ int main(int argc, char** argv) {
             metrics.total_prompt_tokens += prompt_tokens.size();
             metrics.total_completion_tokens += result.tokens.size();
 
-            std::string finish_reason = (result.stop_reason == diffusion::StopReason::EOG) ? "stop"
-                : (result.stop_reason == diffusion::StopReason::MAX_TOKENS ? "length" : "stop");
+            diffusion::StreamFilter filter;
+            filter.in_thinking = diffusion::prompt_ends_with_thinking(prompt);
+            auto items = filter.process(result.text, true);
+            std::string final_content;
+            std::string final_reasoning = result.reasoning_content;
+            json tool_calls = json::array();
+            int tool_idx = 0;
+            for (const auto& it : items) {
+                if (it.type == diffusion::StreamFilter::OutputItem::CONTENT) {
+                    final_content += it.text;
+                } else if (it.type == diffusion::StreamFilter::OutputItem::REASONING) {
+                    final_reasoning += it.text;
+                } else if (it.type == diffusion::StreamFilter::OutputItem::TOOL_CALL) {
+                    tool_calls.push_back({
+                        {"id", "call_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "_" + std::to_string(tool_idx++)},
+                        {"type", "function"},
+                        {"function", {
+                            {"name", it.fn_name},
+                            {"arguments", it.fn_args}
+                        }}
+                    });
+                }
+            }
+
+            std::string finish_reason = filter.had_tool_call ? "tool_calls"
+                : ((result.stop_reason == diffusion::StopReason::EOG) ? "stop"
+                : ((result.stop_reason == diffusion::StopReason::MAX_TOKENS) ? "length" : "stop"));
 
             json msg_obj = {
                 {"role", "assistant"},
-                {"content", result.text}
+                {"content", final_content}
             };
-            if (!result.reasoning_content.empty()) {
-                msg_obj["reasoning_content"] = result.reasoning_content;
+            if (!final_reasoning.empty()) {
+                msg_obj["reasoning_content"] = final_reasoning;
+            }
+            if (!tool_calls.empty()) {
+                msg_obj["tool_calls"] = tool_calls;
             }
 
             json choice = {
@@ -917,7 +1454,7 @@ int main(int argc, char** argv) {
             // Streaming mode via SSE
             res.set_chunked_content_provider(
                 "text/event-stream",
-                [&, prompt, params, id, created, slot](size_t, httplib::DataSink& sink) {
+                [&, prompt, params, id, created, slot, tool_defs](size_t, httplib::DataSink& sink) {
                     // Initial role announcement chunk
                     json init_chunk = {
                         {"id", id},
@@ -936,7 +1473,53 @@ int main(int argc, char** argv) {
                     sink.write(init_sse.data(), init_sse.size());
 
                     std::string pending_text;
-                    bool in_thinking = false;
+                    diffusion::StreamFilter filter;
+                    filter.in_thinking = diffusion::prompt_ends_with_thinking(prompt);
+                    int tool_call_idx = 0;
+
+                    auto emit_items = [&](const std::vector<diffusion::StreamFilter::OutputItem>& items) -> bool {
+                        for (const auto& it : items) {
+                            if (!sink.is_writable()) return false;
+                            std::cout << "[Emit Item] type=" << (int)it.type << " fn=" << it.fn_name << " text=[" << it.text << "]\n";
+                            std::cout.flush();
+                            json delta_obj = json::object();
+                            if (it.type == diffusion::StreamFilter::OutputItem::CONTENT) {
+                                if (it.text.empty()) continue;
+                                delta_obj["content"] = it.text;
+                            } else if (it.type == diffusion::StreamFilter::OutputItem::REASONING) {
+                                if (it.text.empty()) continue;
+                                delta_obj["reasoning_content"] = it.text;
+                            } else if (it.type == diffusion::StreamFilter::OutputItem::TOOL_CALL) {
+                                delta_obj["tool_calls"] = json::array({
+                                    {
+                                        {"index", tool_call_idx++},
+                                        {"id", "call_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "_" + std::to_string(tool_call_idx)},
+                                        {"type", "function"},
+                                        {"function", {
+                                            {"name", it.fn_name},
+                                            {"arguments", it.fn_args}
+                                        }}
+                                    }
+                                });
+                            }
+                            json chunk = {
+                                {"id", id},
+                                {"object", "chat.completion.chunk"},
+                                {"created", created},
+                                {"model", "diffusion-model"},
+                                {"choices", json::array({
+                                    {
+                                        {"index", 0},
+                                        {"delta", delta_obj},
+                                        {"finish_reason", nullptr}
+                                    }
+                                })}
+                            };
+                            std::string sse = "data: " + chunk.dump() + "\n\n";
+                            sink.write(sse.data(), sse.size());
+                        }
+                        return sink.is_writable();
+                    };
 
                     auto callback = [&](const diffusion::StepEvent& ev) -> bool {
                         if (!sink.is_writable()) return false;
@@ -952,41 +1535,8 @@ int main(int argc, char** argv) {
                                 std::string delta_text = pending_text.substr(0, safe_len);
                                 pending_text.erase(0, safe_len);
 
-                                // Check reasoning tags
-                                json delta_obj = json::object();
-                                size_t t_start = delta_text.find("<think>");
-                                size_t t_end = delta_text.find("</think>");
-
-                                if (t_start != std::string::npos) {
-                                    in_thinking = true;
-                                    delta_text.erase(t_start, 7);
-                                }
-                                if (t_end != std::string::npos) {
-                                    in_thinking = false;
-                                    delta_text.erase(t_end, 8);
-                                }
-
-                                if (in_thinking) {
-                                    delta_obj["reasoning_content"] = delta_text;
-                                } else {
-                                    delta_obj["content"] = delta_text;
-                                }
-
-                                json chunk = {
-                                    {"id", id},
-                                    {"object", "chat.completion.chunk"},
-                                    {"created", created},
-                                    {"model", "diffusion-model"},
-                                    {"choices", json::array({
-                                        {
-                                            {"index", 0},
-                                            {"delta", delta_obj},
-                                            {"finish_reason", nullptr}
-                                        }
-                                    })}
-                                };
-                                std::string sse = "data: " + chunk.dump() + "\n\n";
-                                sink.write(sse.data(), sse.size());
+                                auto items = filter.process(delta_text, false);
+                                if (!emit_items(items)) return false;
                             }
                         } else {
                             // Final flush
@@ -999,60 +1549,71 @@ int main(int argc, char** argv) {
                                 }
                             }
                             if (!pending_text.empty()) {
-                                json delta_obj = json::object();
-                                if (in_thinking) delta_obj["reasoning_content"] = pending_text;
-                                else delta_obj["content"] = pending_text;
-
-                                json chunk = {
-                                    {"id", id},
-                                    {"object", "chat.completion.chunk"},
-                                    {"created", created},
-                                    {"model", "diffusion-model"},
-                                    {"choices", json::array({
-                                        {
-                                            {"index", 0},
-                                            {"delta", delta_obj},
-                                            {"finish_reason", nullptr}
-                                        }
-                                    })}
-                                };
-                                std::string sse = "data: " + chunk.dump() + "\n\n";
-                                sink.write(sse.data(), sse.size());
+                                auto items = filter.process(pending_text, true);
+                                if (!emit_items(items)) return false;
+                            } else {
+                                auto items = filter.process("", true);
+                                if (!emit_items(items)) return false;
                             }
                         }
                         return sink.is_writable();
                     };
 
-                    diffusion::GenResult result = engine->generate(prompt, params, callback);
-                    engine->backend().kv_clear(slot->id);
-                    slot_manager.release_slot(slot);
+                    try {
+                        std::cout << "[Request] stream=true prompt_len=" << prompt.size()
+                                  << " tools=" << tool_defs.size() << "\n";
+                        std::cout.flush();
 
-                    metrics.total_completion_tokens += result.tokens.size();
+                        diffusion::GenResult result = engine->generate(prompt, params, callback);
+                        engine->backend().kv_clear(slot->id);
+                        slot_manager.release_slot(slot);
 
-                    std::string finish_reason = (result.stop_reason == diffusion::StopReason::EOG) ? "stop"
-                        : (result.stop_reason == diffusion::StopReason::MAX_TOKENS ? "length" : "stop");
+                        std::cout << "[Completed] tok=" << result.tokens.size()
+                                  << " stop=" << (int)result.stop_reason
+                                  << " had_tool=" << filter.had_tool_call << "\n";
+                        std::cout << "[RAW TEXT] >>>" << result.text << "<<<\n";
+                        std::cout.flush();
 
-                    json final_chunk = {
-                        {"id", id},
-                        {"object", "chat.completion.chunk"},
-                        {"created", created},
-                        {"model", "diffusion-model"},
-                        {"choices", json::array({
-                            {
-                                {"index", 0},
-                                {"delta", json::object()},
-                                {"finish_reason", finish_reason}
-                            }
-                        })}
-                    };
-                    std::string sse = "data: " + final_chunk.dump() + "\n\ndata: [DONE]\n\n";
-                    sink.write(sse.data(), sse.size());
-                    sink.done();
+                        metrics.total_completion_tokens += result.tokens.size();
+
+                        std::string finish_reason = filter.had_tool_call ? "tool_calls"
+                            : ((result.stop_reason == diffusion::StopReason::EOG) ? "stop"
+                            : ((result.stop_reason == diffusion::StopReason::MAX_TOKENS) ? "length" : "stop"));
+
+                        json final_chunk = {
+                            {"id", id},
+                            {"object", "chat.completion.chunk"},
+                            {"created", created},
+                            {"model", "diffusion-model"},
+                            {"choices", json::array({
+                                {
+                                    {"index", 0},
+                                    {"delta", json::object()},
+                                    {"finish_reason", finish_reason}
+                                }
+                            })}
+                        };
+                        std::string sse = "data: " + final_chunk.dump() + "\n\ndata: [DONE]\n\n";
+                        sink.write(sse.data(), sse.size());
+                        sink.done();
+                    } catch (const std::exception& e) {
+                        std::cerr << "[Stream Error] Generation error: " << e.what() << "\n";
+                        engine->backend().kv_clear(slot->id);
+                        slot_manager.release_slot(slot);
+                        sink.done();
+                    } catch (...) {
+                        std::cerr << "[Stream Error] Unknown generation error\n";
+                        engine->backend().kv_clear(slot->id);
+                        slot_manager.release_slot(slot);
+                        sink.done();
+                    }
                     return false;
                 }
             );
         }
-    });
+    };
+    svr.Post("/v1/chat/completions", chat_handler);
+    svr.Post("/chat/completions", chat_handler);
 
     std::cout << "Starting diffusion-server at http://" << config.host << ":" << config.port
               << " (" << slot_manager.total_slots() << " slots)\n";

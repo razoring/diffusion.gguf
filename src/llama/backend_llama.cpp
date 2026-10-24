@@ -116,7 +116,8 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     }
 
     // Pre-allocate persistent batch for zero-allocation decode loop
-    batch_ = llama_batch_init(config.n_batch, 0, cparams.n_seq_max);
+    batch_capacity_ = cparams.n_batch;
+    batch_ = llama_batch_init(batch_capacity_, 0, cparams.n_seq_max);
     batch_initialized_ = true;
 }
 
@@ -164,6 +165,42 @@ bool BackendLlama::supports_kv_shift() const {
 LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_all, int32_t seq_id) {
     if (n <= 0) return LogitsView{};
 
+    if (n > batch_capacity_) {
+        if (!want_all) {
+            // Chunked prefill evaluation in slices of batch_capacity_
+            const int chunk_size = batch_capacity_;
+            for (int p = 0; p < n; p += chunk_size) {
+                int cur_n = std::min(chunk_size, n - p);
+                bool is_last = (p + cur_n == n);
+
+                for (int i = 0; i < cur_n; ++i) {
+                    batch_.token[i] = toks[p + i];
+                    batch_.pos[i] = pos0 + p + i;
+                    batch_.n_seq_id[i] = 1;
+                    batch_.seq_id[i][0] = seq_id;
+                    batch_.logits[i] = (is_last && i == cur_n - 1);
+                }
+                batch_.n_tokens = cur_n;
+
+                if (llama_decode(ctx_, batch_) != 0) {
+                    throw std::runtime_error("llama_decode failed during chunked evaluation");
+                }
+            }
+
+            int last_chunk_len = (n % chunk_size == 0) ? chunk_size : (n % chunk_size);
+            const float* row = llama_get_logits_ith(ctx_, last_chunk_len - 1);
+            if (!row) {
+                throw std::runtime_error("Failed to get logits for last token");
+            }
+            return LogitsView{row, n_vocab_, 1};
+        } else {
+            // want_all requested with n > batch_capacity_
+            llama_batch_free(batch_);
+            batch_ = llama_batch_init(n, 0, 1);
+            batch_capacity_ = n;
+        }
+    }
+
     for (int i = 0; i < n; ++i) {
         batch_.token[i] = toks[i];
         batch_.pos[i] = pos0 + i;
@@ -194,7 +231,7 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
 }
 
 void BackendLlama::kv_truncate(int pos, int32_t seq_id) {
-    if (!ctx_) return;
+    if (!ctx_ || !supports_kv_truncate()) return;
     llama_memory_t mem = llama_get_memory(ctx_);
     llama_memory_seq_rm(mem, seq_id, pos, -1);
 }
@@ -202,7 +239,7 @@ void BackendLlama::kv_truncate(int pos, int32_t seq_id) {
 void BackendLlama::kv_clear(int32_t seq_id) {
     if (!ctx_) return;
     llama_memory_t mem = llama_get_memory(ctx_);
-    if (seq_id < 0) {
+    if (seq_id < 0 || (model_ && (llama_model_is_hybrid(model_) || llama_model_is_recurrent(model_)))) {
         llama_memory_clear(mem, true);
     } else {
         llama_memory_seq_rm(mem, seq_id, 0, -1);
