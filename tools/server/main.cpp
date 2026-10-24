@@ -131,6 +131,72 @@ inline bool parse_tool_call(const std::string& raw, std::string& name, std::stri
                 body = s.substr(brace) + "}";
             }
 
+            // Try robust Gemma key-value parser first (handles <|"|> string wrappers and multiline code)
+            size_t inner_start = body.find('{');
+            size_t inner_end = body.rfind('}');
+            if (inner_start != std::string::npos && inner_end != std::string::npos && inner_end > inner_start) {
+                std::string inner = body.substr(inner_start + 1, inner_end - inner_start - 1);
+                json j = json::object();
+                size_t pos = 0;
+                while (pos < inner.size()) {
+                    while (pos < inner.size() && (inner[pos] == ' ' || inner[pos] == '\n' || inner[pos] == '\r' || inner[pos] == '\t' || inner[pos] == ',')) pos++;
+                    if (pos >= inner.size()) break;
+
+                    size_t colon = inner.find(':', pos);
+                    if (colon == std::string::npos) break;
+
+                    std::string key = inner.substr(pos, colon - pos);
+                    while (!key.empty() && (key.front() == ' ' || key.front() == '"')) key.erase(0, 1);
+                    while (!key.empty() && (key.back() == ' ' || key.back() == '"')) key.pop_back();
+
+                    pos = colon + 1;
+                    while (pos < inner.size() && (inner[pos] == ' ' || inner[pos] == '\n' || inner[pos] == '\r' || inner[pos] == '\t')) pos++;
+                    if (pos >= inner.size()) break;
+
+                    if (inner.compare(pos, 5, "<|\"|>") == 0) {
+                        size_t val_start = pos + 5;
+                        size_t val_end = inner.find("<|\"|>", val_start);
+                        if (val_end == std::string::npos) val_end = inner.size();
+                        std::string val = inner.substr(val_start, val_end - val_start);
+                        j[key] = val;
+                        pos = val_end + (val_end < inner.size() ? 5 : 0);
+                    } else if (inner[pos] == '"') {
+                        size_t val_start = pos + 1;
+                        size_t val_end = val_start;
+                        while (val_end < inner.size()) {
+                            if (inner[val_end] == '"' && inner[val_end - 1] != '\\') break;
+                            val_end++;
+                        }
+                        std::string val = inner.substr(val_start, val_end - val_start);
+                        j[key] = val;
+                        pos = val_end + (val_end < inner.size() ? 1 : 0);
+                    } else {
+                        size_t val_end = inner.find_first_of(",}\n\r", pos);
+                        if (val_end == std::string::npos) val_end = inner.size();
+                        std::string val = inner.substr(pos, val_end - pos);
+                        while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
+                        if (val == "true" || val == "True") j[key] = true;
+                        else if (val == "false" || val == "False") j[key] = false;
+                        else if (val == "null" || val == "None") j[key] = nullptr;
+                        else {
+                            try {
+                                j[key] = json::parse(val);
+                            } catch (...) {
+                                j[key] = val;
+                            }
+                        }
+                        pos = val_end;
+                    }
+                }
+
+                if (!j.empty()) {
+                    args_json = j.dump();
+                    std::cout << "[Tool Parsed Gemma KV] fn=" << name << " args=" << args_json << "\n";
+                    std::cout.flush();
+                    return true;
+                }
+            }
+
             size_t q_pos = 0;
             while ((q_pos = body.find("<|\"|>", q_pos)) != std::string::npos) {
                 body.replace(q_pos, 5, "\"");
@@ -622,7 +688,8 @@ static ServerConfig parse_server_args(int argc, char** argv) {
             if (m == "ar") throw std::runtime_error("Autoregressive mode ('ar') has been completely removed. diffusion.gguf only supports diffusion generation ('block' or 'whole').");
             else if (m == "whole") cfg.default_params.mode = DecodeMode::WHOLE;
             else cfg.default_params.mode = DecodeMode::BLOCK;
-        } else if (arg == "--block") cfg.default_params.block_size = next_int("--block");
+        } else if (arg == "-n" || arg == "--n-predict") cfg.default_params.n_predict = next_int("-n/--n-predict");
+        else if (arg == "--block") cfg.default_params.block_size = next_int("--block");
         else if (arg == "--whole-max") cfg.default_params.whole_max = next_int("--whole-max");
         else if (arg == "--init") {
             std::string s = next_str("--init");
@@ -632,6 +699,10 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         } else if (arg == "--temp") cfg.default_params.sampling.temp = next_float("--temp");
         else if (arg == "--top-p") cfg.default_params.sampling.top_p = next_float("--top-p");
         else if (arg == "--top-k") cfg.default_params.sampling.top_k = next_int("--top-k");
+    }
+
+    if (cfg.default_params.n_predict <= 128) {
+        cfg.default_params.n_predict = 2048;
     }
 
     cfg.backend.n_seq_max = cfg.n_parallel;
@@ -699,8 +770,13 @@ static json format_logprobs_json(const std::vector<TokenLogprobs>& tlp) {
 static GenParams parse_request_params(const json& body, const GenParams& default_params) {
     GenParams params = default_params;
 
-    if (body.contains("max_tokens") && body["max_tokens"].is_number_integer()) params.n_predict = body["max_tokens"].get<int>();
-    else if (body.contains("n_predict") && body["n_predict"].is_number_integer()) params.n_predict = body["n_predict"].get<int>();
+    if (body.contains("max_completion_tokens") && body["max_completion_tokens"].is_number_integer()) {
+        params.n_predict = body["max_completion_tokens"].get<int>();
+    } else if (body.contains("max_tokens") && body["max_tokens"].is_number_integer()) {
+        params.n_predict = body["max_tokens"].get<int>();
+    } else if (body.contains("n_predict") && body["n_predict"].is_number_integer()) {
+        params.n_predict = body["n_predict"].get<int>();
+    }
 
     if (body.contains("temperature") && body["temperature"].is_number()) params.sampling.temp = body["temperature"].get<float>();
     if (body.contains("top_p") && body["top_p"].is_number()) params.sampling.top_p = body["top_p"].get<float>();
