@@ -25,7 +25,20 @@ GenResult SchedulerJacobi::run(
     GenResult result;
     if (prompt.empty()) return result;
 
-    int prompt_len = static_cast<int>(prompt.size());
+    std::vector<int32_t> effective_prompt = prompt;
+    if (backend_.n_ctx() > 0 && static_cast<int>(effective_prompt.size()) >= backend_.n_ctx()) {
+        int max_prompt = std::max(1, backend_.n_ctx() - std::max(64, params.n_predict > 0 ? std::min(params.n_predict, 512) : 128));
+        if (static_cast<int>(effective_prompt.size()) > max_prompt) {
+            std::vector<int32_t> trimmed;
+            trimmed.push_back(effective_prompt.front());
+            int offset = static_cast<int>(effective_prompt.size()) - (max_prompt - 1);
+            trimmed.insert(trimmed.end(), effective_prompt.begin() + offset, effective_prompt.end());
+            effective_prompt = std::move(trimmed);
+            reuse_prefix_len = 0;
+        }
+    }
+
+    int prompt_len = static_cast<int>(effective_prompt.size());
     if (reuse_prefix_len < 0) reuse_prefix_len = 0;
     if (reuse_prefix_len > prompt_len) reuse_prefix_len = prompt_len;
 
@@ -35,39 +48,42 @@ GenResult SchedulerJacobi::run(
     LogitsView prefill_logits;
     if (reuse_prefix_len == 0) {
         backend_.kv_clear(params.seq_id);
-        prefill_logits = backend_.eval(prompt.data(), prompt_len, 0, false, params.seq_id);
-        for (int32_t tok : prompt) {
+        prefill_logits = backend_.eval(effective_prompt.data(), prompt_len, 0, false, params.seq_id);
+        for (int32_t tok : effective_prompt) {
             sampler_.accept(tok);
         }
-        guesser_.update_ngram(prompt);
+        guesser_.update_ngram(effective_prompt);
     } else {
         backend_.kv_truncate(reuse_prefix_len, params.seq_id);
         int new_len = prompt_len - reuse_prefix_len;
         if (new_len > 0) {
-            prefill_logits = backend_.eval(prompt.data() + reuse_prefix_len, new_len, reuse_prefix_len, false, params.seq_id);
-            std::vector<int32_t> new_prompt_slice(prompt.begin() + reuse_prefix_len, prompt.end());
+            prefill_logits = backend_.eval(effective_prompt.data() + reuse_prefix_len, new_len, reuse_prefix_len, false, params.seq_id);
+            std::vector<int32_t> new_prompt_slice(effective_prompt.begin() + reuse_prefix_len, effective_prompt.end());
             for (int32_t tok : new_prompt_slice) {
                 sampler_.accept(tok);
             }
             guesser_.update_ngram(new_prompt_slice);
         } else {
             backend_.kv_truncate(prompt_len - 1, params.seq_id);
-            prefill_logits = backend_.eval(prompt.data() + prompt_len - 1, 1, prompt_len - 1, false, params.seq_id);
+            prefill_logits = backend_.eval(effective_prompt.data() + prompt_len - 1, 1, prompt_len - 1, false, params.seq_id);
         }
     }
 
     // Ensure prompt context is fully indexed
-    guesser_.update_ngram(prompt);
+    guesser_.update_ngram(effective_prompt);
 
     int n_predict = params.n_predict > 0 ? params.n_predict : 128;
     int B_target = (params.mode == DecodeMode::WHOLE) ? params.whole_max : params.block_size;
+    if (!backend_.supports_kv_truncate()) {
+        B_target = 1;
+    }
     if (B_target <= 0) B_target = 32;
 
     int max_iters = params.max_iters > 0 ? params.max_iters : (n_predict + 8);
     int P = prompt_len;
 
-    std::vector<int32_t> running_history = prompt;
-    running_history.reserve(prompt.size() + n_predict + B_target + 32);
+    std::vector<int32_t> running_history = effective_prompt;
+    running_history.reserve(effective_prompt.size() + n_predict + B_target + 32);
 
     // 2. Sample exact first token c[0]
     float p0_conf = 1.0f;
@@ -164,6 +180,14 @@ GenResult SchedulerJacobi::run(
             int32_t tok = c[j];
             sampler_.accept(tok);
             result.tokens.push_back(tok);
+
+            // Invariant I4: Discard tokens after EOG
+            if (tokenizer_.is_eog(tok)) {
+                stop_reason = StopReason::EOG;
+                should_stop = true;
+                break;
+            }
+
             committed_this_step.push_back(tok);
             result.text += tokenizer_.piece(tok);
 
@@ -201,13 +225,6 @@ GenResult SchedulerJacobi::run(
                     }
                 }
                 result.token_logprobs.push_back(std::move(tlp));
-            }
-
-            // Invariant I4: Discard tokens after EOG
-            if (tokenizer_.is_eog(tok)) {
-                stop_reason = StopReason::EOG;
-                should_stop = true;
-                break;
             }
 
             // Stop strings

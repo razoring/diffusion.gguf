@@ -98,6 +98,7 @@ private:
     int n_vocab_ = 0;
     int n_ctx_ = 0;
     int n_embd_ = 0;
+    int batch_capacity_ = 0;
     llama_batch batch_{};
     bool batch_initialized_ = false;
 
