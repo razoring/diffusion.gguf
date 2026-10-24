@@ -845,6 +845,7 @@ int main(int argc, char** argv) {
     httplib::Server svr;
     diffusion::SlotManager slot_manager(config.n_parallel);
     diffusion::ServerMetrics metrics;
+    std::mutex engine_mutex;
 
     svr.set_exception_handler([](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
         try {
@@ -1134,10 +1135,15 @@ int main(int argc, char** argv) {
         uint64_t created = static_cast<uint64_t>(std::time(nullptr));
         metrics.total_requests++;
 
+        diffusion::GenResult result;
+        std::vector<int32_t> prompt_tokens;
         if (!stream) {
-            auto prompt_tokens = engine->tokenizer().tokenize(prompt, true, true);
-            diffusion::GenResult result = engine->generate(prompt, params);
-            engine->backend().kv_clear(slot->id);
+            {
+                std::lock_guard<std::mutex> lock(engine_mutex);
+                prompt_tokens = engine->tokenizer().tokenize(prompt, true, true);
+                result = engine->generate(prompt, params);
+                engine->backend().kv_clear(slot->id);
+            }
             slot_manager.release_slot(slot);
 
             metrics.total_prompt_tokens += prompt_tokens.size();
@@ -1378,10 +1384,15 @@ int main(int argc, char** argv) {
         uint64_t created = static_cast<uint64_t>(std::time(nullptr));
         metrics.total_requests++;
 
+        diffusion::GenResult result;
+        std::vector<int32_t> prompt_tokens;
         if (!stream) {
-            auto prompt_tokens = engine->tokenizer().tokenize(prompt, true, true);
-            diffusion::GenResult result = engine->generate(prompt, params);
-            engine->backend().kv_clear(slot->id);
+            {
+                std::lock_guard<std::mutex> lock(engine_mutex);
+                prompt_tokens = engine->tokenizer().tokenize(prompt, true, true);
+                result = engine->generate(prompt, params);
+                engine->backend().kv_clear(slot->id);
+            }
             slot_manager.release_slot(slot);
 
             metrics.total_prompt_tokens += prompt_tokens.size();
@@ -1564,8 +1575,12 @@ int main(int argc, char** argv) {
                                   << " tools=" << tool_defs.size() << "\n";
                         std::cout.flush();
 
-                        diffusion::GenResult result = engine->generate(prompt, params, callback);
-                        engine->backend().kv_clear(slot->id);
+                        diffusion::GenResult result;
+                        {
+                            std::lock_guard<std::mutex> lock(engine_mutex);
+                            result = engine->generate(prompt, params, callback);
+                            engine->backend().kv_clear(slot->id);
+                        }
                         slot_manager.release_slot(slot);
 
                         std::cout << "[Completed] tok=" << result.tokens.size()
