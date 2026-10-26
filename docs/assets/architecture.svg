@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="100%" height="400" fill="none">
+  <defs>
+    <pattern id="archGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#141923" stroke-width="0.8"/>
+    </pattern>
+    <linearGradient id="boxGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#151b26"/>
+      <stop offset="100%" stop-color="#0f131c"/>
+    </linearGradient>
+    <linearGradient id="highlightGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f0ff"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#00f0ff"/>
+    </marker>
+    <marker id="arrowMuted" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#475569"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#10b981"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="400" fill="#0b0e14"/>
+  <rect width="960" height="400" fill="url(#archGrid)"/>
+  <rect x="1" y="1" width="958" height="398" fill="none" stroke="#1b2230" stroke-width="1.5"/>
+
+  <!-- Header Label -->
+  <g transform="translate(48, 36)">
+    <rect x="0" y="0" width="8" height="8" fill="#00f0ff"/>
+    <text x="18" y="8" font-family="ui-monospace, monospace" font-size="12" font-weight="700" fill="#94a3b8" letter-spacing="2">PIPELINE ARCHITECTURE // BLOCK REFINEMENT &amp; VERIFICATION</text>
+  </g>
+
+  <!-- Step 1: Hypothesis Canvas -->
+  <g transform="translate(240, 60)">
+    <rect width="480" height="52" rx="4" fill="url(#boxGrad)" stroke="#263147" stroke-width="1.2"/>
+    <path d="M 0 4 L 4 0 L 480 0" stroke="#00f0ff" stroke-width="2" fill="none" opacity="0.8"/>
+    <text x="24" y="24" font-family="ui-monospace, monospace" font-size="10.5" font-weight="700" fill="#00f0ff" letter-spacing="1.5">01 // HYPOTHESIS CANVAS</text>
+    <text x="24" y="40" font-family="ui-monospace, monospace" font-size="13.5" font-weight="500" fill="#f8fafc">
+      c = [ c<tspan font-size="10">0</tspan>, c<tspan font-size="10">1</tspan>, c<tspan font-size="10">2</tspan>, &hellip;, c<tspan font-size="10">B-1</tspan> ]
+      <tspan fill="#64748b" font-size="11.5"> (N-gram / Draft / Padding)</tspan>
+    </text>
+  </g>
+
+  <!-- Flow 1 -> 2 -->
+  <line x1="480" y1="112" x2="480" y2="138" stroke="#00f0ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Step 2: Parallel Batch Forward Pass -->
+  <g transform="translate(240, 142)">
+    <rect width="480" height="52" rx="4" fill="url(#boxGrad)" stroke="#263147" stroke-width="1.2"/>
+    <text x="24" y="24" font-family="ui-monospace, monospace" font-size="10.5" font-weight="700" fill="#00f0ff" letter-spacing="1.5">02 // PARALLEL UNIFIED FORWARD PASS</text>
+    <text x="24" y="40" font-family="ui-monospace, monospace" font-size="13" font-weight="500" fill="#f8fafc">
+      backend.eval(c, B, P) &rarr; <tspan fill="#38bdf8">LogitsView L[0 .. B-1]</tspan>
+      <tspan fill="#64748b" font-size="11.5"> (1 ubatch call)</tspan>
+    </text>
+  </g>
+
+  <!-- Flow 2 -> 3 -->
+  <line x1="480" y1="194" x2="480" y2="220" stroke="#00f0ff" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Step 3: Prefix Verification -->
+  <g transform="translate(240, 224)">
+    <rect width="480" height="52" rx="4" fill="url(#boxGrad)" stroke="#263147" stroke-width="1.2"/>
+    <text x="24" y="24" font-family="ui-monospace, monospace" font-size="10.5" font-weight="700" fill="#00f0ff" letter-spacing="1.5">03 // EXACT GREEDY PREFIX VERIFICATION</text>
+    <text x="24" y="40" font-family="ui-monospace, monospace" font-size="13" font-weight="500" fill="#f8fafc">
+      p[i+1] = sample(L[i]); find longest k where <tspan fill="#10b981">c[0..k] == p[0..k]</tspan>
+    </text>
+  </g>
+
+  <!-- Flow Split 3 -> 4A (Committed) and 3 -> 4B (Iterate) -->
+  <path d="M 360 276 L 360 304 L 230 304 L 230 322" stroke="#10b981" stroke-width="1.5" fill="none" marker-end="url(#arrowGreen)"/>
+  <path d="M 600 276 L 600 304 L 730 304 L 730 322" stroke="#00f0ff" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- Step 4A: Committed Output -->
+  <g transform="translate(80, 326)">
+    <rect width="300" height="50" rx="4" fill="#0d1b18" stroke="#065f46" stroke-width="1.2"/>
+    <text x="16" y="22" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#10b981" letter-spacing="1">COMMITTED PREFIX (EXACT AR)</text>
+    <text x="16" y="38" font-family="ui-monospace, monospace" font-size="12" font-weight="500" fill="#ecfdf5">
+      Stream c[0 .. k] &rarr; SSE / Terminal
+    </text>
+  </g>
+
+  <!-- Step 4B: Canvas Iteration -->
+  <g transform="translate(580, 326)">
+    <rect width="300" height="50" rx="4" fill="#0e1726" stroke="#1e3a5f" stroke-width="1.2"/>
+    <text x="16" y="22" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#38bdf8" letter-spacing="1">UNVERIFIED TAIL REFINEMENT</text>
+    <text x="16" y="38" font-family="ui-monospace, monospace" font-size="12" font-weight="500" fill="#e0f2fe">
+      Truncate KV &amp; Shimmer Next Canvas
+    </text>
+  </g>
+
+  <!-- Feedback Loop Wire from 4B back up to 01 -->
+  <path d="M 880 351 L 910 351 L 910 86 L 726 86" stroke="#334155" stroke-width="1.2" stroke-dasharray="4,4" fill="none" marker-end="url(#arrowMuted)"/>
+  <text x="918" y="215" font-family="ui-monospace, monospace" font-size="9.5" fill="#64748b" transform="rotate(90 918 215)" letter-spacing="1">NEXT CANVAS PASS</text>
+</svg>

@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 260" width="100%" height="260" fill="none">
+  <defs>
+    <pattern id="modeGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#141923" stroke-width="0.8"/>
+    </pattern>
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#141a24"/>
+      <stop offset="100%" stop-color="#0d1118"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="260" fill="#0b0e14"/>
+  <rect width="960" height="260" fill="url(#modeGrid)"/>
+  <rect x="1" y="1" width="958" height="258" fill="none" stroke="#1b2230" stroke-width="1.5"/>
+
+  <!-- Left Card: Exact Base Engine (Default) -->
+  <g transform="translate(48, 36)">
+    <rect width="408" height="188" rx="4" fill="url(#cardGrad)" stroke="#1e293b" stroke-width="1.2"/>
+    <path d="M 0 4 L 4 0 L 408 0" stroke="#10b981" stroke-width="2" fill="none"/>
+    
+    <!-- Title -->
+    <text x="20" y="32" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#10b981" letter-spacing="1.5">DEFAULT // BASE EXACT ENGINE (B=1)</text>
+    <text x="20" y="54" font-family="ui-monospace, monospace" font-size="16" font-weight="700" fill="#ffffff">Bit-for-Bit Deterministic Parity</text>
+
+    <!-- Bullets -->
+    <text x="20" y="88" font-family="ui-monospace, monospace" font-size="12" fill="#94a3b8">
+      &bull; <tspan fill="#f1f5f9">Zero speculative drift</tspan>: exact greedy token output
+    </text>
+    <text x="20" y="112" font-family="ui-monospace, monospace" font-size="12" fill="#94a3b8">
+      &bull; <tspan fill="#f1f5f9">Optimized memory footprint</tspan>: no multi-row PCIe copies
+    </text>
+    <text x="20" y="136" font-family="ui-monospace, monospace" font-size="12" fill="#94a3b8">
+      &bull; <tspan fill="#f1f5f9">Native hybrid support</tspan>: SWA + M-RoPE + GDN states
+    </text>
+    <text x="20" y="160" font-family="ui-monospace, monospace" font-size="12" fill="#94a3b8">
+      &bull; <tspan fill="#f1f5f9">Prefix KV cache reuse</tspan>: cuts prompt prefill latency
+    </text>
+  </g>
+
+  <!-- Right Card: Speculative Block Diffusion (Opt-in) -->
+  <g transform="translate(504, 36)">
+    <rect width="408" height="188" rx="4" fill="url(#cardGrad)" stroke="#1e293b" stroke-width="1.2"/>
+    <path d="M 0 4 L 4 0 L 408 0" stroke="#00f0ff" stroke-width="2" fill="none"/>
+
+    <!-- Title -->
+    <text x="20" y="32" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#00f0ff" letter-spacing="1.5">EXPERIMENTAL // SPECULATIVE BLOCK (B &gt; 1)</text>
+    <text x="20" y="54" font-family="ui-monospace, monospace" font-size="16" font-weight="700" fill="#ffffff">Parallel Batch Convergence</text>
+
+    <!-- Bullets -->
+    <text x="20" y="88" font-family="ui-monospace, monospace" font-size="12" fill="#94a3b8">
+      &bull; <tspan fill="#f1f5f9">Opt-in flag</tspan>: <tspan fill="#38bdf8">--speculative &lt;B&gt;</tspan> or <tspan fill="#38bdf8">--block &lt;B&gt;</tspan>
+    </text>
+    <text x="20" y="112" font-family="ui-monospace, monospace" font-size="12" fill="#94a3b8">
+      &bull; <tspan fill="#f1f5f9">Multi-order N-gram guesser</tspan> with Markov backoff
+    </text>
+    <text x="20" y="136" font-family="ui-monospace, monospace" font-size="12" fill="#94a3b8">
+      &bull; <tspan fill="#f1f5f9">ANSI Live Terminal</tspan>: in-place token shimmering
+    </text>
+    <text x="20" y="160" font-family="ui-monospace, monospace" font-size="12" fill="#94a3b8">
+      &bull; <tspan fill="#f1f5f9">CUDA Graph batch caching</tspan> across steady block size
+    </text>
+  </g>
+</svg>

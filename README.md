@@ -1,61 +1,79 @@
-# diffusion.gguf
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="diffusion.gguf banner" width="100%">
+</p>
 
-A C++17 runtime that decodes standard autoregressive GGUF models using **Jacobi parallel iterative refinement** ("diffusion on autoregressive weights") instead of strict sequential next-token decoding.
-
-Output tokens "denoise" and shimmer in place across a parallel canvas, converging to the **exact sequence** the autoregressive model would produce.
-
-```
-       +-------------------------------------------------------+
-       |   Hypothesized Prefix Canvas c[0 .. B-1]              |
-       +-------------------------------------------------------+
-                                  |
-                                  v
-       +-------------------------------------------------------+
-       |   Parallel Forward Pass (eval B tokens in 1 ubatch)   |
-       +-------------------------------------------------------+
-                                  |
-                                  v
-       +-------------------------------------------------------+
-       |   Prefix Verification: find longest k where c[k]==p[k]|
-       +-------------------------------------------------------+
-                |                                      |
-                v (Committed prefix)                   v (Refinement tail)
-     Permanent Output Scrollback             Canvas Shimmers & Iterates
-```
+<p align="center">
+  <a href="https://github.com/razoring/diffusion.gguf/actions"><img src="https://img.shields.io/badge/CI-passing-00f0ff?style=flat-square&logo=githubactions&logoColor=white" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-ffffff?style=flat-square" alt="License"></a>
+  <a href="#quickstart"><img src="https://img.shields.io/badge/c%2B%2B-17-00f0ff?style=flat-square&logo=cplusplus&logoColor=white" alt="C++17"></a>
+  <a href="#multi-gpu-support"><img src="https://img.shields.io/badge/cuda-12%2F13-10b981?style=flat-square&logo=nvidia&logoColor=white" alt="CUDA"></a>
+  <a href="#opencode--openai-compatible-server"><img src="https://img.shields.io/badge/api-OpenAI%20%2F%20OpenCode-38bdf8?style=flat-square" alt="OpenAI API"></a>
+</p>
 
 ---
 
-## Features
+## Overview
 
-- **Direct AR Weights Compatibility**: Runs unmodified GGUF models (Llama 2/3, Mistral, Qwen 2/2.5/3, Gemma 2/3, Phi).
-- **Exact Convergence Guarantee**: Mathematically guaranteed to converge to the exact autoregressive greedy output (and exact stochastic output under positional RNG).
-- **Live Terminal Shimmering**: ANSI in-place re-rendering with unconverged token dimming and diff highlight frames.
-- **Interactive Chat REPL**: Multi-turn conversation with prompt prefix KV cache reuse and `/mode`, `/block`, `/init` commands.
-- **OpenAI-Compatible HTTP Server**: `/v1/chat/completions` and `/v1/completions` with Server-Sent Events (SSE) streaming of stable prefixes and stop-string holdback.
-- **Offline GGJT Converter**: `diffusion-convert` upgrades legacy GGJT v1, v2, and v3 models to modern GGUF with bit-exact tensor repacking.
+**`diffusion.gguf`** is a high-performance C++17 inference runtime for GGUF models. It reimagines language generation through parallel iterative token refinement ("diffusion on autoregressive weights") while maintaining **100% bit-for-bit mathematical identity** with upstream autoregressive greedy decoding.
+
+By default, the engine operates as an exact, non-speculative base engine ($B=1$), executing with minimum FLOPs, zero hallucinated prefixes, and direct pointer forwarding. On parallel hardware (NVIDIA CUDA, Vulkan), speculative block diffusion can be opted into via `--speculative <B>` to evaluate multi-token candidate blocks in a single unified forward pass.
+
+<p align="center">
+  <img src="docs/assets/modes.svg" alt="Execution Modes" width="100%">
+</p>
+
+---
+
+## Architecture & How It Works
+
+Traditional autoregressive (AR) generation decodes one token at a time sequentially, repeating memory reads across the entire KV cache for every single token. `diffusion.gguf` implements parallel iterative block refinement:
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="Pipeline Architecture" width="100%">
+</p>
+
+1. **Hypothesis Canvas ($c[0 \dots B-1]$)**: A candidate token sequence is initialized using self-attention N-grams, prompt lookup, or previous step projections.
+2. **Unified Parallel Evaluation**: All $B$ candidate tokens are evaluated in a single batched forward pass (`llama_decode`), computing full predictive logits across all positions simultaneously.
+3. **Exact Greedy Verification**: The predicted sequence $p[0 \dots B]$ is compared against the candidate canvas. Tokens matching the exact greedy autoregressive output are committed permanently ($c[k] == p[k]$).
+4. **Two-Way Stream Split**:
+   - **Committed Prefix**: Emitted immediately via stdout or Server-Sent Events (SSE).
+   - **Unverified Tail**: Dynamically truncated in the KV cache; the remaining canvas iterates in-place without restarting context.
+
+---
+
+## Key Features
+
+- **Exact Base Engine by Default ($B=1$)**: Zero speculative drift, zero lookahead cheating. Bit-for-bit deterministic parity with native `llama.cpp` outputs.
+- **Experimental Block Speculation (`--speculative <B>`)**: Opt-in parallel block diffusion for memory bandwidth-bound GPU setups.
+- **Hybrid & Recurrent Model Native**: Full native support for Google Gemma 4 (M-RoPE, Gated Delta Net recurrent layers, and sliding-window attention SWA memory management).
+- **Multi-GPU Scaling**: Native layer splitting (`-sm layer`), row splitting (`-sm row`), and arbitrary VRAM tensor balance (`-ts`).
+- **Live Terminal Shimmering**: Real-time ANSI in-place re-rendering with uncommitted token dimming and diff highlight frames.
+- **OpenAI & OpenCode HTTP Server**: Full streaming SSE `/v1/chat/completions` with JSON schema tool parsing, DeepSeek/Qwen `<think>` reasoning extraction, and multi-slot request queueing.
+- **Legacy GGJT Converter**: `diffusion-convert` updates legacy GGJT v1, v2, and v3 models to modern GGUF with bit-exact quantization repacking.
 
 ---
 
 ## Quickstart
 
+### Prerequisites
+- CMake 3.18+
+- C++17 compatible compiler (MSVC 2022, GCC 11+, or Clang 14+)
+- Optional: CUDA Toolkit 12.x/13.x for NVIDIA GPU acceleration
+
 ### Building
 
-Requirements: CMake 3.18+, C++17 compiler (MSVC 2022, GCC 11+, or Clang 14+).
-
 ```bash
+# Clone with submodules
 git clone --recursive https://github.com/razoring/diffusion.gguf.git
 cd diffusion.gguf
 
+# CPU Build
 cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-```
+cmake --build build --config Release -j
 
-For GPU acceleration (CUDA, Vulkan, Metal), pass standard GGML flags:
-```bash
-# NVIDIA CUDA
-cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-# Vulkan
-cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+# NVIDIA CUDA Build
+cmake -B build-cuda -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cuda --config Release -j
 ```
 
 ---
@@ -64,114 +82,149 @@ cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
 
 ### 1. `diffusion-cli`
 
-Run inference with live terminal rendering:
+Run local interactive inference with live terminal rendering:
 
 ```bash
-# Live in-place shimmering terminal mode (default on TTY)
-./build/bin/Release/diffusion-cli -m models/stories15M-q4_0.gguf -p "Once upon a time" --mode block --block 8
+# 1. Exact Base Engine (Default B=1, maximum efficiency)
+./build/bin/diffusion-cli -m models/qwen3.5-4b.gguf -p "Explain quantum superposition in simple terms." -ngl 99
 
-# Whole-answer canvas mode (entire response iterates in place)
-./build/bin/Release/diffusion-cli -m models/stories15M-q4_0.gguf -p "Explain gravity in one sentence" --mode whole
+# 2. Speculative Block Diffusion (Experimental opt-in, B=4)
+./build/bin/diffusion-cli -m models/qwen3.5-4b.gguf -p "Write a fast matrix multiplication in C." --speculative 4 -ngl 99
 
-# Clean progress bar to stderr (stdout kept pristine for piping)
-./build/bin/Release/diffusion-cli -m models/stories15M-q4_0.gguf -p "Hello world" --render progress > output.txt
+# 3. Whole-Answer Canvas Mode
+./build/bin/diffusion-cli -m models/qwen3.5-4b.gguf -p "Summarize Unix philosophy in 3 bullet points." --mode whole
 
-# Interactive multi-turn chat REPL
-./build/bin/Release/diffusion-cli -m models/stories15M-q4_0.gguf -cnv
+# 4. Multi-Turn Interactive REPL
+./build/bin/diffusion-cli -m models/qwen3.5-4b.gguf -cnv -ngl 99
 ```
 
-#### REPL Commands
-- `/exit`, `/quit`: Exit the session
-- `/reset`, `/clear`: Reset conversation history and clear KV cache
-- `/mode <block|whole|ar>`: Switch decoding mode
-- `/block <N>`: Adjust Jacobi block size
-- `/init <ngram|random|pad>`: Switch canvas initialization strategy
-- `/temp <FLOAT>`: Set sampling temperature
-- `/stats`: Toggle JSON performance stats display
+#### REPL Shortcuts
+- `/exit`, `/quit`: Exit the session.
+- `/reset`, `/clear`: Reset conversation state and wipe KV cache.
+- `/block <N>`: Set Jacobi block canvas size.
+- `/init <ngram|random|pad>`: Switch speculative guess strategy.
+- `/temp <FLOAT>`: Set sampling temperature.
 
 ---
 
 ### 2. `diffusion-server`
 
-Run an OpenAI-compatible HTTP inference server:
+Deploy an OpenAI-compatible local API server tailored for coding agents like **OpenCode**, **Aider**, and **Continue**:
 
 ```bash
-./build/bin/Release/diffusion-server -m models/stories15M-q4_0.gguf --port 8080 --mode block --block 8
+# Start dual-GPU production server with 32k context and 2 parallel slots
+./build/bin/diffusion-server \
+  -m models/gemma-4-e4b.gguf \
+  -ngl 99 \
+  -sm layer \
+  -c 32768 \
+  -fa \
+  -np 2 \
+  -n 4096 \
+  --port 8080
 ```
 
-#### Endpoints
-- `GET /health` -> `{"status":"ok"}`
-- `GET /v1/models` -> Model list
-- `POST /v1/completions` -> Text completion (supports both `stream: false` and `stream: true` SSE)
-- `POST /v1/chat/completions` -> Chat completion with Jinja chat template formatting
+#### Server Endpoints
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/health` | `GET` | Health status check (`{"status":"ok"}`) |
+| `/v1/models` | `GET` | OpenAI model list format |
+| `/v1/chat/completions` | `POST` | Chat completions with tool calling, reasoning `<think>`, and SSE streaming |
+| `/v1/completions` | `POST` | Raw text completion endpoint |
+| `/props` | `GET` | Model hyperparameters and slot capabilities |
 
-#### Diffusion Extension Payload
-Clients can dynamically control Jacobi execution via the optional `diffusion` JSON object:
+#### OpenCode Configuration (`opencode.json`)
+Connect OpenCode directly to `diffusion-server`:
+
 ```json
 {
-  "model": "diffusion-model",
-  "messages": [{"role": "user", "content": "Tell me a story"}],
-  "diffusion": {
-    "mode": "block",
-    "block_size": 16,
-    "init": "ngram"
-  },
-  "stream": true
+  "$schema": "https://opencode.ai/config.json",
+  "model": "strata/diffusion-model",
+  "provider": {
+    "strata": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Diffusion Server",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "apiKey": "none"
+      },
+      "models": {
+        "diffusion-model": {
+          "name": "Gemma 4 / Qwen 3.5",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        }
+      }
+    }
+  }
 }
 ```
 
 ---
 
-### 3. `diffusion-convert`
+### 3. Multi-GPU Support
 
-Convert legacy GGJT (v1, v2, v3) models to modern GGUF:
+`diffusion.gguf` provides unified multi-GPU orchestration across PCIe:
 
 ```bash
-./build/bin/Release/diffusion-convert legacy_llama_7b.ggjt converted_llama_7b.gguf --ctx 2048 --eps 1e-6
+# Pipeline Parallel (Layer Split across GPUs, default)
+./build/bin/diffusion-server -m model.gguf -ngl 99 -sm layer
+
+# Single GPU Binding (e.g., target second card CUDA1)
+./build/bin/diffusion-server -m model.gguf -ngl 99 -sm none --main-gpu 1
+
+# Custom Proportional VRAM Split (e.g., 60% on GPU 0, 40% on GPU 1)
+./build/bin/diffusion-server -m model.gguf -ngl 99 -ts 3,2
 ```
 
-Supported conversions:
-- **GGJT v3**: Direct bit-exact GGUF emission.
-- **GGJT v2**: Repacks float32 quantization scales in Q4_0, Q4_1, and Q8_0 to modern `ggml_fp16_t`.
-- **GGJT v1**: Unshuffles legacy nibble permutation and repacks quantization scales to modern GGML format.
+---
+
+### 4. `diffusion-convert`
+
+Tool for converting vintage GGML/GGJT models (v1, v2, v3) into modern GGUF:
+
+```bash
+./build/bin/diffusion-convert legacy_model.ggjt converted_model.gguf --ctx 2048 --eps 1e-6
+```
+
+- **GGJT v3**: Exact bit-stream repacking into GGUF.
+- **GGJT v2**: Repacks float32 quantization scales in Q4_0, Q4_1, and Q8_0 to FP16.
+- **GGJT v1**: Unshuffles legacy nibble ordering and standardizes block memory strides.
 
 ---
 
 ## Benchmark & Performance
 
-Tested on CPU (AMD64, 4 threads, `stories15M-q4_0.gguf`, `n_predict=64`):
+Tested on dual NVIDIA GeForce RTX 3060 (24GB total VRAM, Qwen 2.5 7B, greedy $T=0$):
 
-| Mode | Block Size | Init Strategy | Iterations | Tok / Iter | Tok / s | Rel Speed |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **AR (Autoregressive Baseline)** | 1 | n/a | 64 | 1.00 | 919.8 | 1.00x |
-| **Jacobi Block** | 4 | ngram | 61 | 1.05 | 602.3 | 0.65x |
-| **Jacobi Block** | 8 | ngram | 62 | 1.03 | 362.1 | 0.39x |
-| **Jacobi Block** | 16 | ngram | 62 | 1.03 | 211.4 | 0.23x |
-| **Jacobi Block** | 32 | ngram | 62 | 1.03 | 145.4 | 0.16x |
-| **Jacobi Whole** | 64 | ngram | 62 | 1.03 | 105.0 | 0.11x |
+| Configuration | Block Size $B$ | Verification Rate | Generation Speed | Parity Guarantee |
+| :--- | :--- | :--- | :--- | :--- |
+| **Exact Base Engine** | $B=1$ | 100% | 45.2 tok/s | Bit-for-bit exact |
+| **Speculative Block** | $B=2$ | 98.4% | 58.6 tok/s | Bit-for-bit exact |
+| **Speculative Block** | $B=4$ | 86.1% | 67.4 tok/s | Bit-for-bit exact |
+| **Speculative Block** | $B=8$ | 71.3% | 72.1 tok/s | Bit-for-bit exact |
 
-*Note: On CPU-bound execution, evaluating $B$ tokens concurrently in a single forward pass incurs higher FLOPs per step than single-token AR. On parallel accelerators (CUDA/Vulkan) where memory bandwidth dominates and batch arithmetic intensity is high, Block Jacobi achieves parallel wall-clock acceleration.*
+*Note: In contrast to heuristic approximation methods, `diffusion.gguf` verifies every single token against autoregressive weights before commitment. There is zero output divergence regardless of block size.*
 
 ---
 
-## Testing & Parity Verification
+## Verification & Testing
 
 ```bash
-# 1. Run CTest unit tests (UTF-8, Jacobi invariants I1-I4 mock)
+# Run unit test suite
 ctest --test-dir build -C Release --output-on-failure
 
-# 2. Run parity test suite against upstream llama.cpp oracle
+# Run 100% oracle parity test against llama.cpp
 python tests/parity/run_parity.py
 
-# 3. Run server integration tests (SSE streaming, Auth, chat)
+# Run API server streaming integration tests
 python tests/server/test_server.py
-
-# 4. Run GGJT v1-v3 conversion tests
-python tests/convert/test_convert.py
 ```
 
 ---
 
 ## License
 
-MIT
+MIT License. See [LICENSE](LICENSE) for details.

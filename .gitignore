@@ -1,17 +1,25 @@
 # Build directories
 build/
 build-cuda/
+build-ninja-cuda/
 bin/
 out/
 .cache/
 
-build-cuda/
-build-ninja-cuda/
+# Binary / build artifacts
+*.exe
+*.obj
+*.lib
+*.pdb
+*.exp
+*.ilk
 
 # VS / IDE files
 .vs/
 *.user
 *.suo
+.idea/
+.vscode/
 
 # Models & datasets
 models/
@@ -24,6 +32,12 @@ __pycache__/
 *.pyc
 .venv/
 
-# Test workspace for opencode
+# Test workspace & scratch
 test_workspace/
+scratch_*
+test_gemma_*
+maple_street_coffee.html
+*.bak
 
+# Internal research findings (keep local only)
+docs/p0_findings.md
