@@ -248,8 +248,9 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
 }
 
 bool BackendLlama::set_sampler(int32_t seq_id, void* sampler) {
-    if (!ctx_) return false;
-    return llama_set_sampler(ctx_, seq_id, static_cast<llama_sampler*>(sampler));
+    (void)seq_id;
+    (void)sampler;
+    return false;
 }
 
 int32_t BackendLlama::get_sampled_token(int32_t idx) const {

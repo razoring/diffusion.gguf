@@ -146,7 +146,16 @@ int32_t SamplerLlama::sample(const float* logits, int abs_pos, float* out_prob) 
 
     int32_t sel = cur_p.selected;
     if (sel < 0 || sel >= static_cast<int32_t>(cur_p.size)) {
-        sel = 0;
+        // Fallback: if no sampler selected a token, pick argmax instead of index 0 (<pad>)
+        int32_t best_idx = 0;
+        float max_l = cur_p.data[0].logit;
+        for (size_t i = 1; i < cur_p.size; ++i) {
+            if (cur_p.data[i].logit > max_l) {
+                max_l = cur_p.data[i].logit;
+                best_idx = static_cast<int32_t>(i);
+            }
+        }
+        sel = best_idx;
     }
 
     if (out_prob) {
@@ -289,6 +298,7 @@ std::unique_ptr<SamplerLlama> SamplerLlama::create(
         ));
     } else if (params.rng_mode == RngMode::POSITIONAL) {
         pos_sampler = llama_sampler_init_dist_positional(params.seed);
+        llama_sampler_chain_add(chain, pos_sampler);
     } else {
         llama_sampler_chain_add(chain, llama_sampler_init_dist(params.seed));
     }

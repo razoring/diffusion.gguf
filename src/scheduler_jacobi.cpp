@@ -51,10 +51,7 @@ GenResult SchedulerJacobi::run(
         B_target = 1;
     }
 
-    bool use_backend_sampling = (B_target == 1 && !params.logprobs && sampler_.raw_chain() != nullptr);
-    if (use_backend_sampling) {
-        use_backend_sampling = backend_.set_sampler(params.seq_id, sampler_.raw_chain());
-    }
+    bool use_backend_sampling = false; // Backend sampler offload disabled in favor of SIMD/CPU sampling
 
     struct BackendSamplerGuard {
         IModelBackend& b;
