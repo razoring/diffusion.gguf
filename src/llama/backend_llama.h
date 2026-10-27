@@ -14,7 +14,7 @@ struct BackendConfig {
     int32_t n_ubatch = 512;
     int32_t n_gpu_layers = 0;
     int32_t n_threads = 0; // 0 = auto-detect hardware concurrency
-    bool flash_attn = false;
+    bool flash_attn = true;
     bool swa_full = true;
     bool kv_unified = true;
 

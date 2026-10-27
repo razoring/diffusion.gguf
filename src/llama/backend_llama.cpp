@@ -79,7 +79,7 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     cparams.type_k = parse_ggml_type(config.cache_type_k);
     cparams.type_v = parse_ggml_type(config.cache_type_v);
     bool quant_v = (cparams.type_v != GGML_TYPE_F16 && cparams.type_v != GGML_TYPE_F32);
-    cparams.flash_attn_type = (config.flash_attn || quant_v) ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    cparams.flash_attn_type = (config.flash_attn || quant_v) ? LLAMA_FLASH_ATTN_TYPE_AUTO : LLAMA_FLASH_ATTN_TYPE_DISABLED;
 
     if (config.rope_scaling_type >= 0) {
         cparams.rope_scaling_type = static_cast<enum llama_rope_scaling_type>(config.rope_scaling_type);

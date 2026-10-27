@@ -679,6 +679,7 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         else if (arg == "-t" || arg == "--threads") cfg.backend.n_threads = next_int("-t/--threads");
         else if (arg == "-ngl" || arg == "--n-gpu-layers") cfg.backend.n_gpu_layers = next_int("-ngl/--n-gpu-layers");
         else if (arg == "-fa" || arg == "--flash-attn") cfg.backend.flash_attn = true;
+        else if (arg == "--no-flash-attn") cfg.backend.flash_attn = false;
         else if (arg == "--kv-unified") cfg.backend.kv_unified = true;
         else if (arg == "--no-kv-unified") cfg.backend.kv_unified = false;
         else if (arg == "--no-mmap") cfg.backend.use_mmap = false;
