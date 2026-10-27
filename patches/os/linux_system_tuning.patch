@@ -1,0 +1,19 @@
+# diffusion.gguf: Linux Low-Latency Real-Time Kernel & Memory Tuning
+# Apply to /etc/sysctl.d/99-diffusion-tuning.conf and /etc/security/limits.d/99-realtime.conf
+
+# 1. Sysctl memory and scheduler parameters:
+# vm.transparent_hugepage.enabled = always
+# vm.transparent_hugepage.defrag = defer+madvise
+# kernel.sched_rt_runtime_us = -1
+# vm.max_map_count = 1048576
+
+# 2. Real-time priorities in /etc/security/limits.d/99-realtime.conf:
+# *               soft    rtprio          99
+# *               hard    rtprio          99
+# *               soft    memlock         unlimited
+# *               hard    memlock         unlimited
+
+# Quick command to apply in terminal:
+# sudo sysctl -w vm.max_map_count=1048576
+# sudo sysctl -w kernel.sched_rt_runtime_us=-1
+# echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled

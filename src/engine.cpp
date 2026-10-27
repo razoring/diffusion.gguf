@@ -1,18 +1,22 @@
 #include "engine.h"
 #include "init_guess.h"
 #include "scheduler_jacobi.h"
+#include "os/os_tuning.h"
 #include <algorithm>
 #include <stdexcept>
 
 namespace diffusion {
 
 Engine::Engine(const BackendConfig& config) {
+    os::tune_process_for_inference();
     backend_ = std::make_unique<BackendLlama>(config);
     tokenizer_ = std::make_unique<TokenizerLlama>(backend_->raw_vocab());
     chat_formatter_ = std::make_unique<ChatLlama>(backend_->raw_model());
 }
 
-Engine::~Engine() = default;
+Engine::~Engine() {
+    os::restore_process_tuning();
+}
 
 GenResult Engine::generate(
     const std::string& prompt,

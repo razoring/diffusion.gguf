@@ -1,0 +1,111 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_shuffle : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+struct LogitsReduction {
+    int top_token;
+    int second_token;
+    float max_logit;
+    float second_logit;
+    float entropy_estimate;
+};
+
+layout(std430, binding = 0) readonly buffer InputLogits {
+    float logits[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputReductions {
+    LogitsReduction out_reductions[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint n_vocab;
+    uint batch_size;
+} pc;
+
+void update_pair_vk(
+    inout float max1, inout int tok1,
+    inout float max2, inout int tok2,
+    float new_val, int new_idx
+) {
+    if (new_val > max1) {
+        max2 = max1;
+        tok2 = tok1;
+        max1 = new_val;
+        tok1 = new_idx;
+    } else if (new_val > max2) {
+        max2 = new_val;
+        tok2 = new_idx;
+    }
+}
+
+shared float s_max1[32];
+shared int   s_tok1[32];
+shared float s_max2[32];
+shared int   s_tok2[32];
+
+void main() {
+    uint b = gl_WorkGroupID.x;
+    if (b >= pc.batch_size) return;
+
+    uint base_offset = b * pc.n_vocab;
+    float l_max1 = -1e30;
+    float l_max2 = -1e30;
+    int   l_tok1 = 0;
+    int   l_tok2 = -1;
+
+    for (uint i = gl_LocalInvocationID.x; i < pc.n_vocab; i += gl_WorkGroupSize.x) {
+        float val = logits[base_offset + i];
+        update_pair_vk(l_max1, l_tok1, l_max2, l_tok2, val, int(i));
+    }
+
+    // Subgroup shuffle reduction
+    for (uint offset = gl_SubgroupSize / 2; offset > 0; offset /= 2) {
+        float o_max1 = subgroupShuffleDown(l_max1, offset);
+        int   o_tok1 = subgroupShuffleDown(l_tok1, offset);
+        float o_max2 = subgroupShuffleDown(l_max2, offset);
+        int   o_tok2 = subgroupShuffleDown(l_tok2, offset);
+
+        update_pair_vk(l_max1, l_tok1, l_max2, l_tok2, o_max1, o_tok1);
+        update_pair_vk(l_max1, l_tok1, l_max2, l_tok2, o_max2, o_tok2);
+    }
+
+    if (subgroupElect()) {
+        s_max1[gl_SubgroupID] = l_max1;
+        s_tok1[gl_SubgroupID] = l_tok1;
+        s_max2[gl_SubgroupID] = l_max2;
+        s_tok2[gl_SubgroupID] = l_tok2;
+    }
+    barrier();
+
+    if (gl_SubgroupID == 0) {
+        uint num_subgroups = gl_NumSubgroups;
+        float b_max1 = (gl_SubgroupInvocationID < num_subgroups) ? s_max1[gl_SubgroupInvocationID] : -1e30;
+        int   b_tok1 = (gl_SubgroupInvocationID < num_subgroups) ? s_tok1[gl_SubgroupInvocationID] : 0;
+        float b_max2 = (gl_SubgroupInvocationID < num_subgroups) ? s_max2[gl_SubgroupInvocationID] : -1e30;
+        int   b_tok2 = (gl_SubgroupInvocationID < num_subgroups) ? s_tok2[gl_SubgroupInvocationID] : -1;
+
+        for (uint offset = gl_SubgroupSize / 2; offset > 0; offset /= 2) {
+            float o_max1 = subgroupShuffleDown(b_max1, offset);
+            int   o_tok1 = subgroupShuffleDown(b_tok1, offset);
+            float o_max2 = subgroupShuffleDown(b_max2, offset);
+            int   o_tok2 = subgroupShuffleDown(b_tok2, offset);
+
+            update_pair_vk(b_max1, b_tok1, b_max2, b_tok2, o_max1, o_tok1);
+            update_pair_vk(b_max1, b_tok1, b_max2, b_tok2, o_max2, o_tok2);
+        }
+
+        if (gl_SubgroupInvocationID == 0) {
+            float margin = b_max1 - b_max2;
+            float entropy = (margin > 0.0) ? log(1.0 + exp(-margin)) : 1.0;
+
+            out_reductions[b].top_token = b_tok1;
+            out_reductions[b].second_token = b_tok2;
+            out_reductions[b].max_logit = b_max1;
+            out_reductions[b].second_logit = b_max2;
+            out_reductions[b].entropy_estimate = entropy;
+        }
+    }
+}

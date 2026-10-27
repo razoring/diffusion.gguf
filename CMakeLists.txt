@@ -48,7 +48,15 @@ add_library(diffusion_core STATIC
     src/llama/sampler_llama.cpp
     src/llama/chat_llama.cpp
     src/llama/dist_positional.cpp
+    src/os/os_tuning.cpp
+    src/kernels/reduce_logits_cpu.cpp
 )
+
+if (GGML_CUDA)
+    enable_language(CUDA)
+    target_sources(diffusion_core PRIVATE src/kernels/reduce_logits_cuda.cu)
+    target_compile_definitions(diffusion_core PUBLIC DIFFUSION_USE_CUDA)
+endif()
 
 target_include_directories(diffusion_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -64,6 +72,9 @@ target_link_libraries(diffusion_core PUBLIC
     llama-common
     ggml
 )
+if (WIN32)
+    target_link_libraries(diffusion_core PUBLIC winmm)
+endif()
 
 # CLI executable
 add_executable(diffusion-cli

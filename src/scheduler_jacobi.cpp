@@ -1,4 +1,5 @@
 #include "scheduler_jacobi.h"
+#include "kernels/reduce_logits.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -73,9 +74,11 @@ GenResult SchedulerJacobi::run(
     guesser_.update_ngram(effective_prompt);
 
     int n_predict = params.n_predict > 0 ? params.n_predict : 128;
-    int B_target = (params.mode == DecodeMode::WHOLE) ? params.whole_max : params.block_size;
+    bool is_adaptive = (params.mode == DecodeMode::BLOCK && params.block_size <= 1);
+    int B_target = is_adaptive ? 2 : ((params.mode == DecodeMode::WHOLE) ? params.whole_max : params.block_size);
     if (!backend_.supports_kv_truncate()) {
         B_target = 1;
+        is_adaptive = false;
     }
     if (B_target <= 0) B_target = 32;
 
@@ -136,6 +139,22 @@ GenResult SchedulerJacobi::run(
         // Parallel evaluation of B canvas tokens (only requests all logits when B > 1)
         LogitsView L = backend_.eval(c.data(), B, P, (B > 1), params.seq_id);
 
+        // Fused parallel logit reduction
+        std::vector<kernels::LogitsReduction> reductions(B);
+        kernels::reduce_logits_cpu(L.row(0), backend_.n_vocab(), B, reductions.data());
+
+        // Dynamic B adaptation based on entropy and logit margin
+        if (is_adaptive && backend_.supports_kv_truncate()) {
+            float margin = reductions[0].max_logit - reductions[0].second_logit;
+            if (reductions[0].entropy_estimate < 0.25f || margin > 2.0f) {
+                B_target = 4; // High confidence (code syntax, JSON, structured repetitive tokens)
+            } else if (reductions[0].entropy_estimate < 0.60f || margin > 1.0f) {
+                B_target = 3;
+            } else {
+                B_target = 2; // Ambiguous prose, minimal forward overhead
+            }
+        }
+
         // Sample position 0: predicts next token p[1]
         auto st = sampler_.clone();
         st->accept(c[0]);
@@ -146,8 +165,12 @@ GenResult SchedulerJacobi::run(
         conf[0] = 1.0f;
 
         int k = 0;
-        // Sample position 0: predicts next token p[1]
-        p[1] = st->sample(L.row(0), P + 1, &conf[1]);
+        if (params.sampling.temp == 0.0f && reductions[0].top_token >= 0) {
+            p[1] = reductions[0].top_token;
+            conf[1] = 1.0f;
+        } else {
+            p[1] = st->sample(L.row(0), P + 1, &conf[1]);
+        }
 
         // Lazily verify downstream slots (strictly exact token match)
         for (int i = 0; i + 1 < B; ++i) {
@@ -158,7 +181,12 @@ GenResult SchedulerJacobi::run(
 
             k++;
             st->accept(c[i + 1]);
-            p[i + 2] = st->sample(L.row(i + 1), P + i + 2, &conf[i + 2]);
+            if (params.sampling.temp == 0.0f && i + 1 < static_cast<int>(reductions.size()) && reductions[i + 1].top_token >= 0) {
+                p[i + 2] = reductions[i + 1].top_token;
+                conf[i + 2] = 1.0f;
+            } else {
+                p[i + 2] = st->sample(L.row(i + 1), P + i + 2, &conf[i + 2]);
+            }
         }
 
         // Invariant I2: At least 1 token (c[0..k]) is committed each step
@@ -294,6 +322,14 @@ GenResult SchedulerJacobi::run(
             next_c.push_back(p[k + 1]);
         } else {
             next_c.push_back(tokenizer_.pad_or_fallback());
+        }
+
+        // Anderson fixed-point momentum: recycle self-predictions from unverified forward pass slots
+        for (int r = k + 1; r < B && static_cast<int>(next_c.size()) < remaining_needed; ++r) {
+            if (r < static_cast<int>(reductions.size()) && reductions[r].top_token >= 0 &&
+                reductions[r].top_token < backend_.n_vocab()) {
+                next_c.push_back(reductions[r].top_token);
+            }
         }
 
         // Adaptive Self-Lookahead & Prompt Lookup Draft Generation
