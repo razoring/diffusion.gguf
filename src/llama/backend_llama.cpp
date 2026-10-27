@@ -1,8 +1,10 @@
 #include "backend_llama.h"
 #include "common.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <thread>
 
 namespace diffusion {
 
@@ -32,6 +34,8 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
         mparams.split_mode = LLAMA_SPLIT_MODE_NONE;
     } else if (config.split_mode == 2) {
         mparams.split_mode = LLAMA_SPLIT_MODE_ROW;
+    } else if (config.split_mode == 3) {
+        mparams.split_mode = LLAMA_SPLIT_MODE_TENSOR;
     } else {
         mparams.split_mode = LLAMA_SPLIT_MODE_LAYER;
     }
@@ -60,12 +64,17 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = config.n_ctx;
-    cparams.n_rs_seq = 8;
-    cparams.n_batch = std::max((uint32_t)config.n_batch, cparams.n_rs_seq + 1);
-    cparams.n_ubatch = std::max((uint32_t)config.n_ubatch, cparams.n_rs_seq + 1);
-    cparams.n_threads = config.n_threads;
-    cparams.n_threads_batch = config.n_threads;
+    cparams.n_rs_seq = 0; // Pure decoding / non-speculative: eliminate recurrent rollback slots
+    cparams.n_batch = config.n_batch;
+    cparams.n_ubatch = config.n_ubatch;
+    int32_t threads = config.n_threads > 0 ? config.n_threads : std::max(1u, std::thread::hardware_concurrency() / 2);
+    cparams.n_threads = threads;
+    cparams.n_threads_batch = threads;
     cparams.swa_full = config.swa_full;
+    cparams.kv_unified = false;
+    cparams.offload_kqv = true;
+    cparams.op_offload = true;
+    cparams.no_perf = true;
     cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;
     cparams.type_k = parse_ggml_type(config.cache_type_k);
     cparams.type_v = parse_ggml_type(config.cache_type_v);

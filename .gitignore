@@ -41,3 +41,8 @@ maple_street_coffee.html
 
 # Internal research findings (keep local only)
 docs/p0_findings.md
+
+*.log
+test_diff_speed.py
+index.html
+benchmark_raw.json

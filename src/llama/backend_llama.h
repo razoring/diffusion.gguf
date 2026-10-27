@@ -13,12 +13,12 @@ struct BackendConfig {
     int32_t n_batch = 512;
     int32_t n_ubatch = 512;
     int32_t n_gpu_layers = 0;
-    int32_t n_threads = 4;
+    int32_t n_threads = 0; // 0 = auto-detect hardware concurrency
     bool flash_attn = false;
-    bool swa_full = false;
+    bool swa_full = true;
 
     // Multi-GPU options
-    int32_t split_mode = 1; // 0=none, 1=layer (default), 2=row
+    int32_t split_mode = 1; // 0=none, 1=layer (default), 2=row, 3=tensor
     int32_t main_gpu = 0;
     std::string tensor_split_str; // comma-separated proportions, e.g. "3,2" or "1,1"
 

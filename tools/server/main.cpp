@@ -693,6 +693,7 @@ static ServerConfig parse_server_args(int argc, char** argv) {
             std::string sm = next_str("-sm/--split-mode");
             if (sm == "none") cfg.backend.split_mode = 0;
             else if (sm == "row") cfg.backend.split_mode = 2;
+            else if (sm == "tensor") cfg.backend.split_mode = 3;
             else cfg.backend.split_mode = 1; // layer
         }
         else if (arg == "-ts" || arg == "--tensor-split") cfg.backend.tensor_split_str = next_str("-ts/--tensor-split");
@@ -1584,8 +1585,6 @@ int main(int argc, char** argv) {
                     auto emit_items = [&](const std::vector<diffusion::StreamFilter::OutputItem>& items) -> bool {
                         for (const auto& it : items) {
                             if (!sink.is_writable()) return false;
-                            std::cout << "[Emit Item] type=" << (int)it.type << " fn=" << it.fn_name << " text=[" << it.text << "]\n";
-                            std::cout.flush();
                             json delta_obj = json::object();
                             if (it.type == diffusion::StreamFilter::OutputItem::CONTENT) {
                                 if (it.text.empty()) continue;
