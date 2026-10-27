@@ -197,6 +197,10 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
             }
 
             int last_chunk_len = (n % chunk_size == 0) ? chunk_size : (n % chunk_size);
+            int32_t sampled = llama_get_sampled_token_ith(ctx_, last_chunk_len - 1);
+            if (sampled >= 0) {
+                return LogitsView{nullptr, n_vocab_, 1};
+            }
             const float* row = llama_get_logits_ith(ctx_, last_chunk_len - 1);
             if (!row) {
                 throw std::runtime_error("Failed to get logits for last token");
@@ -231,12 +235,27 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
         }
         return LogitsView{logits, n_vocab_, n};
     } else {
+        int32_t sampled = llama_get_sampled_token_ith(ctx_, n - 1);
+        if (sampled >= 0) {
+            // Backend sampling active: GPU sampled token directly, raw logits DtoH skipped
+            return LogitsView{nullptr, n_vocab_, 1};
+        }
         const float* row = llama_get_logits_ith(ctx_, n - 1);
         if (!row) {
             throw std::runtime_error("Failed to get logits for last token");
         }
         return LogitsView{row, n_vocab_, 1};
     }
+}
+
+bool BackendLlama::set_sampler(int32_t seq_id, void* sampler) {
+    if (!ctx_) return false;
+    return llama_set_sampler(ctx_, seq_id, static_cast<llama_sampler*>(sampler));
+}
+
+int32_t BackendLlama::get_sampled_token(int32_t idx) const {
+    if (!ctx_) return -1;
+    return llama_get_sampled_token_ith(ctx_, idx);
 }
 
 void BackendLlama::kv_truncate(int pos, int32_t seq_id) {

@@ -45,6 +45,26 @@ GenResult SchedulerJacobi::run(
 
     auto t_start = std::chrono::steady_clock::now();
 
+    int n_predict = params.n_predict > 0 ? params.n_predict : 128;
+    int B_target = (params.mode == DecodeMode::WHOLE) ? params.whole_max : params.block_size;
+    if (!backend_.supports_kv_truncate() || B_target < 1) {
+        B_target = 1;
+    }
+
+    bool use_backend_sampling = (B_target == 1 && !params.logprobs && sampler_.raw_chain() != nullptr);
+    if (use_backend_sampling) {
+        use_backend_sampling = backend_.set_sampler(params.seq_id, sampler_.raw_chain());
+    }
+
+    struct BackendSamplerGuard {
+        IModelBackend& b;
+        int32_t seq;
+        bool active;
+        ~BackendSamplerGuard() {
+            if (active) b.set_sampler(seq, nullptr);
+        }
+    } sampler_guard{backend_, params.seq_id, use_backend_sampling};
+
     // 1. Prefill prompt (with optional KV prefix reuse)
     LogitsView prefill_logits;
     if (reuse_prefix_len == 0) {
@@ -73,12 +93,6 @@ GenResult SchedulerJacobi::run(
     // Ensure prompt context is fully indexed
     guesser_.update_ngram(effective_prompt);
 
-    int n_predict = params.n_predict > 0 ? params.n_predict : 128;
-    int B_target = (params.mode == DecodeMode::WHOLE) ? params.whole_max : params.block_size;
-    if (!backend_.supports_kv_truncate() || B_target < 1) {
-        B_target = 1;
-    }
-
     int max_iters = params.max_iters > 0 ? params.max_iters : (n_predict + 8);
     int P = prompt_len;
 
@@ -86,8 +100,14 @@ GenResult SchedulerJacobi::run(
     running_history.reserve(effective_prompt.size() + n_predict + B_target + 32);
 
     // 2. Sample exact first token c[0]
-    float p0_conf = 1.0f;
-    int32_t first_tok = sampler_.sample(prefill_logits.row(0), P, &p0_conf);
+    int32_t first_tok = -1;
+    if (use_backend_sampling) {
+        first_tok = backend_.get_sampled_token(0);
+    }
+    if (first_tok < 0) {
+        float p0_conf = 1.0f;
+        first_tok = sampler_.sample(prefill_logits.row(0), P, &p0_conf);
+    }
 
     StopReason stop_reason = StopReason::NONE;
 
@@ -115,12 +135,18 @@ GenResult SchedulerJacobi::run(
                 }
             }
 
-            // 1. Parallel evaluation of 1 token (only single output logit row computed)
-            LogitsView L = backend_.eval(&current_token, 1, P, false, params.seq_id);
+            // 1. Parallel evaluation of 1 token on GPU
+            LogitsView L = backend_.eval(&current_token, 1, P, params.logprobs, params.seq_id);
 
-            // 2. Sample next token from position P + 1
-            float next_conf = 1.0f;
-            int32_t next_tok = sampler_.sample(L.row(0), P + 1, &next_conf);
+            // 2. Sample next token from position P + 1 (GPU backend sampler or CPU fallback)
+            int32_t next_tok = -1;
+            if (use_backend_sampling) {
+                next_tok = backend_.get_sampled_token(0);
+            }
+            if (next_tok < 0) {
+                float next_conf = 1.0f;
+                next_tok = sampler_.sample(L.row(0), P + 1, &next_conf);
+            }
 
             // 3. Commit current token
             sampler_.accept(current_token);

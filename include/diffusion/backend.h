@@ -29,6 +29,10 @@ public:
     // want_all=true -> returns logits for all n rows; want_all=false -> last row only.
     virtual LogitsView eval(const int32_t* toks, int n, int pos0, bool want_all, int32_t seq_id = 0) = 0;
 
+    // Backend GPU Sampler Offload
+    virtual bool set_sampler(int32_t seq_id, void* sampler) { (void)seq_id; (void)sampler; return false; }
+    virtual int32_t get_sampled_token(int32_t idx = 0) const { (void)idx; return -1; }
+
     // Drops KV cache for absolute positions >= pos
     virtual void kv_truncate(int pos, int32_t seq_id = 0) = 0;
 

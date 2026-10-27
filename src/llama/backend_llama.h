@@ -10,7 +10,7 @@ namespace diffusion {
 struct BackendConfig {
     std::string model_path;
     int32_t n_ctx = 2048;
-    int32_t n_batch = 512;
+    int32_t n_batch = 2048;
     int32_t n_ubatch = 512;
     int32_t n_gpu_layers = 0;
     int32_t n_threads = 0; // 0 = auto-detect hardware concurrency
@@ -73,6 +73,8 @@ public:
     bool supports_kv_shift() const override;
 
     LogitsView eval(const int32_t* toks, int n, int pos0, bool want_all, int32_t seq_id = 0) override;
+    bool set_sampler(int32_t seq_id, void* sampler) override;
+    int32_t get_sampled_token(int32_t idx = 0) const override;
     void kv_truncate(int pos, int32_t seq_id = 0) override;
     void kv_clear(int32_t seq_id = -1) override;
     void kv_shift(int32_t seq_id, int32_t p0, int32_t p1, int32_t delta) override;

@@ -674,6 +674,8 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         else if (arg == "-np" || arg == "--parallel") cfg.n_parallel = next_int("-np/--parallel");
         else if (arg == "--api-key") cfg.api_key = next_str("--api-key");
         else if (arg == "-c" || arg == "--ctx-size") cfg.backend.n_ctx = next_int("-c/--ctx-size");
+        else if (arg == "-b" || arg == "--batch-size") cfg.backend.n_batch = next_int("-b/--batch-size");
+        else if (arg == "-ub" || arg == "--ubatch-size") cfg.backend.n_ubatch = next_int("-ub/--ubatch-size");
         else if (arg == "-t" || arg == "--threads") cfg.backend.n_threads = next_int("-t/--threads");
         else if (arg == "-ngl" || arg == "--n-gpu-layers") cfg.backend.n_gpu_layers = next_int("-ngl/--n-gpu-layers");
         else if (arg == "-fa" || arg == "--flash-attn") cfg.backend.flash_attn = true;
@@ -907,6 +909,12 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
 #endif
+
+    llama_log_set([](enum ggml_log_level level, const char* text, void* /*user_data*/) {
+        if (level >= GGML_LOG_LEVEL_INFO) {
+            fputs(text, stderr);
+        }
+    }, nullptr);
 
     diffusion::ServerConfig config = diffusion::parse_server_args(argc, argv);
 
