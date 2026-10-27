@@ -101,7 +101,7 @@ static inline int32_t fast_argmax_simd(const float* data, int n) {
 #endif
 
 int32_t SamplerLlama::sample(const float* logits, int abs_pos, float* out_prob) {
-    if (!logits) return 0;
+    if (!logits) return -1;
 
     // Fast-path: SIMD vectorized argmax for pure greedy decoding
     if (is_pure_greedy_ && n_vocab_ > 0) {
@@ -121,7 +121,7 @@ int32_t SamplerLlama::sample(const float* logits, int abs_pos, float* out_prob) 
         return best_id;
     }
 
-    if (!chain_) return 0;
+    if (!chain_) return -1;
 
     if (pos_sampler_) {
         llama_sampler_dist_positional_set_pos(pos_sampler_, abs_pos);

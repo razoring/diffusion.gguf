@@ -102,7 +102,7 @@ GenResult SchedulerJacobi::run(
     // 2. Sample exact first token c[0]
     int32_t first_tok = -1;
     if (use_backend_sampling) {
-        first_tok = backend_.get_sampled_token(0);
+        first_tok = backend_.get_sampled_token(-1);
     }
     if (first_tok < 0) {
         float p0_conf = 1.0f;
@@ -141,7 +141,7 @@ GenResult SchedulerJacobi::run(
             // 2. Sample next token from position P + 1 (GPU backend sampler or CPU fallback)
             int32_t next_tok = -1;
             if (use_backend_sampling) {
-                next_tok = backend_.get_sampled_token(0);
+                next_tok = backend_.get_sampled_token(-1);
             }
             if (next_tok < 0) {
                 float next_conf = 1.0f;

@@ -71,7 +71,7 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     cparams.n_threads = threads;
     cparams.n_threads_batch = threads;
     cparams.swa_full = config.swa_full;
-    cparams.kv_unified = false;
+    cparams.kv_unified = config.kv_unified;
     cparams.offload_kqv = true;
     cparams.op_offload = true;
     cparams.no_perf = true;
@@ -196,12 +196,11 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
                 }
             }
 
-            int last_chunk_len = (n % chunk_size == 0) ? chunk_size : (n % chunk_size);
-            int32_t sampled = llama_get_sampled_token_ith(ctx_, last_chunk_len - 1);
-            if (sampled >= 0) {
+            last_sampled_token_ = llama_get_sampled_token_ith(ctx_, -1);
+            if (last_sampled_token_ >= 0) {
                 return LogitsView{nullptr, n_vocab_, 1};
             }
-            const float* row = llama_get_logits_ith(ctx_, last_chunk_len - 1);
+            const float* row = llama_get_logits_ith(ctx_, -1);
             if (!row) {
                 throw std::runtime_error("Failed to get logits for last token");
             }
@@ -235,12 +234,12 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
         }
         return LogitsView{logits, n_vocab_, n};
     } else {
-        int32_t sampled = llama_get_sampled_token_ith(ctx_, n - 1);
-        if (sampled >= 0) {
+        last_sampled_token_ = llama_get_sampled_token_ith(ctx_, -1);
+        if (last_sampled_token_ >= 0) {
             // Backend sampling active: GPU sampled token directly, raw logits DtoH skipped
             return LogitsView{nullptr, n_vocab_, 1};
         }
-        const float* row = llama_get_logits_ith(ctx_, n - 1);
+        const float* row = llama_get_logits_ith(ctx_, -1);
         if (!row) {
             throw std::runtime_error("Failed to get logits for last token");
         }
@@ -254,6 +253,9 @@ bool BackendLlama::set_sampler(int32_t seq_id, void* sampler) {
 }
 
 int32_t BackendLlama::get_sampled_token(int32_t idx) const {
+    if (last_sampled_token_ >= 0 && (idx == -1 || idx == 0)) {
+        return last_sampled_token_;
+    }
     if (!ctx_) return -1;
     return llama_get_sampled_token_ith(ctx_, idx);
 }
