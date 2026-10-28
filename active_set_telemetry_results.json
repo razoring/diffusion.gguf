@@ -2,10 +2,11 @@
   "degenerate_b1": {
     "active_set": "natural_collapse",
     "tail_pruning": "off",
+    "commitment_policy": "soft",
     "block_size": 1,
     "tokens": 256,
-    "elapsed_s": 4.111206800007494,
-    "tok_per_s": 62.26882092127629,
+    "elapsed_s": 4.565920499997446,
+    "tok_per_s": 56.067555271744915,
     "diffusion_iterations": 256,
     "tokens_per_iteration": 1.0,
     "telemetry": {
@@ -13,7 +14,7 @@
       "degenerate_w1_passes": 256,
       "effective_parallelism_ratio": 1.0,
       "empirical_throughput_by_width": {
-        "1": 63.66732232402638
+        "1": 57.40493372981606
       },
       "mobility": {
         "avg_lifetime_passes": 0.0,
@@ -36,10 +37,11 @@
   "uniform_b16": {
     "active_set": "disabled",
     "tail_pruning": "off",
+    "commitment_policy": "soft",
     "block_size": 16,
     "tokens": 256,
-    "elapsed_s": 13.03922499998589,
-    "tok_per_s": 19.633068683167675,
+    "elapsed_s": 12.568316300021252,
+    "tok_per_s": 20.368678977276147,
     "diffusion_iterations": 249,
     "tokens_per_iteration": 1.0281124497991967,
     "telemetry": {
@@ -47,7 +49,7 @@
       "degenerate_w1_passes": 0,
       "effective_parallelism_ratio": 1.0,
       "empirical_throughput_by_width": {
-        "16": 21.196587084522054
+        "16": 22.417725415264282
       },
       "mobility": {
         "avg_lifetime_passes": 1.0,
@@ -84,13 +86,14 @@
       }
     }
   },
-  "natural_collapse": {
+  "policy2_soft": {
     "active_set": "natural_collapse",
     "tail_pruning": "off",
+    "commitment_policy": "soft",
     "block_size": 16,
     "tokens": 256,
-    "elapsed_s": 11.787864700017963,
-    "tok_per_s": 21.71724960497807,
+    "elapsed_s": 11.02668700000504,
+    "tok_per_s": 23.21640217046906,
     "diffusion_iterations": 249,
     "tokens_per_iteration": 1.0281124497991967,
     "telemetry": {
@@ -98,13 +101,13 @@
       "degenerate_w1_passes": 0,
       "effective_parallelism_ratio": 0.7361947791164659,
       "empirical_throughput_by_width": {
-        "10": 24.53883842504865,
-        "11": 26.71808413524694,
-        "12": 24.337792990520917,
-        "14": 22.92011084461348,
-        "15": 19.772716917450627,
-        "16": 20.39384595304521,
-        "9": 24.061771379485414
+        "10": 27.43233740686093,
+        "11": 27.94740298757738,
+        "12": 24.745786534926697,
+        "14": 23.398098262955376,
+        "15": 21.93005456769665,
+        "16": 21.90596499426794,
+        "9": 26.3838319877579
       },
       "mobility": {
         "avg_lifetime_passes": 1.0,
@@ -132,13 +135,13 @@
         28
       ],
       "time_weighted_width_histogram": {
-        "10": 48.56416447974569,
-        "11": 2.0428880311015822,
-        "12": 9.344529568190453,
-        "14": 12.303923066958353,
-        "15": 10.581813768941792,
-        "16": 13.381991415334502,
-        "9": 3.7806896697276287
+        "10": 47.175763476779196,
+        "11": 2.1209002759287414,
+        "12": 9.980428827109716,
+        "14": 13.08855158008251,
+        "15": 10.360926174564272,
+        "16": 13.529112897641019,
+        "9": 3.7443167678945435
       },
       "total_forward_passes": 249,
       "w_critical_detected": 9,
@@ -153,13 +156,14 @@
       }
     }
   },
-  "adaptive_tail": {
+  "policy1_prefix": {
     "active_set": "natural_collapse",
-    "tail_pruning": "adaptive",
+    "tail_pruning": "off",
+    "commitment_policy": "prefix",
     "block_size": 16,
     "tokens": 256,
-    "elapsed_s": 11.48681500001112,
-    "tok_per_s": 22.286421431854887,
+    "elapsed_s": 11.497684900008608,
+    "tok_per_s": 22.26535187094998,
     "diffusion_iterations": 249,
     "tokens_per_iteration": 1.0281124497991967,
     "telemetry": {
@@ -167,13 +171,13 @@
       "degenerate_w1_passes": 0,
       "effective_parallelism_ratio": 0.7361947791164659,
       "empirical_throughput_by_width": {
-        "10": 26.008065676917482,
-        "11": 26.112274074428687,
-        "12": 23.798531154657134,
-        "14": 21.786752670458498,
-        "15": 21.666553623778196,
-        "16": 21.348985460629265,
-        "9": 27.47509382744542
+        "10": 24.615472496813144,
+        "11": 25.582753812896264,
+        "12": 23.41391779467118,
+        "14": 23.21634790371357,
+        "15": 22.6389762458081,
+        "16": 22.755976288272706,
+        "9": 24.02136941022734
       },
       "mobility": {
         "avg_lifetime_passes": 1.0,
@@ -201,13 +205,150 @@
         28
       ],
       "time_weighted_width_histogram": {
-        "10": 47.64929679220242,
-        "11": 2.1737010150534877,
-        "12": 9.937636538028013,
-        "14": 13.460538789358168,
-        "15": 10.042255187960238,
-        "16": 13.293436534868357,
-        "9": 3.4431351425293117
+        "10": 49.69065284378842,
+        "11": 2.1898559230862746,
+        "12": 9.96959469742877,
+        "14": 12.467499921101583,
+        "15": 9.485989415100354,
+        "16": 12.309413636298276,
+        "9": 3.8869935631963255
+      },
+      "total_forward_passes": 249,
+      "w_critical_detected": 9,
+      "width_pass_count": {
+        "10": 130,
+        "11": 5,
+        "12": 24,
+        "14": 29,
+        "15": 22,
+        "16": 29,
+        "9": 10
+      }
+    }
+  },
+  "policy3_uncommitted": {
+    "active_set": "natural_collapse",
+    "tail_pruning": "off",
+    "commitment_policy": "uncommitted",
+    "block_size": 16,
+    "tokens": 256,
+    "elapsed_s": 3.9506576000130735,
+    "tok_per_s": 64.7993387225339,
+    "diffusion_iterations": 80,
+    "tokens_per_iteration": 3.2,
+    "telemetry": {
+      "avg_frontier_width": 14.375,
+      "degenerate_w1_passes": 0,
+      "effective_parallelism_ratio": 0.8984375,
+      "empirical_throughput_by_width": {
+        "11": 19.38297528670651,
+        "14": 9.136814662760171,
+        "15": 7.72180896244627,
+        "16": 125.54968751171933,
+        "3": 36.8573008170035,
+        "9": 48.363249457640705
+      },
+      "mobility": {
+        "avg_lifetime_passes": 2.5806451612903225,
+        "contractions": 5,
+        "expansions": 1,
+        "shifts": 30,
+        "stationary_passes": 49
+      },
+      "position_flips": [
+        67,
+        67,
+        68,
+        72,
+        70,
+        72,
+        74,
+        73,
+        74,
+        70,
+        70,
+        67,
+        64,
+        61,
+        38,
+        33
+      ],
+      "time_weighted_width_histogram": {
+        "11": 4.306060089256675,
+        "14": 27.404820839800653,
+        "15": 10.808899404148674,
+        "16": 51.1888787773488,
+        "3": 2.2645243803265847,
+        "9": 4.026816509118609
+      },
+      "total_forward_passes": 80,
+      "w_critical_detected": 16,
+      "width_pass_count": {
+        "11": 4,
+        "14": 24,
+        "15": 8,
+        "16": 38,
+        "3": 2,
+        "9": 4
+      }
+    }
+  },
+  "policy2_adaptive_tail": {
+    "active_set": "natural_collapse",
+    "tail_pruning": "adaptive",
+    "commitment_policy": "soft",
+    "block_size": 16,
+    "tokens": 256,
+    "elapsed_s": 10.879950500006089,
+    "tok_per_s": 23.529518815352766,
+    "diffusion_iterations": 249,
+    "tokens_per_iteration": 1.0281124497991967,
+    "telemetry": {
+      "avg_frontier_width": 11.779116465863455,
+      "degenerate_w1_passes": 0,
+      "effective_parallelism_ratio": 0.7361947791164659,
+      "empirical_throughput_by_width": {
+        "10": 27.045563309534614,
+        "11": 26.43113587806436,
+        "12": 24.087563109415346,
+        "14": 24.329582653478464,
+        "15": 24.02342179175036,
+        "16": 24.654265023487294,
+        "9": 25.263945066077845
+      },
+      "mobility": {
+        "avg_lifetime_passes": 1.0,
+        "contractions": 6,
+        "expansions": 0,
+        "shifts": 248,
+        "stationary_passes": 0
+      },
+      "position_flips": [
+        248,
+        165,
+        215,
+        239,
+        226,
+        220,
+        217,
+        218,
+        233,
+        220,
+        91,
+        94,
+        70,
+        77,
+        48,
+        28
+      ],
+      "time_weighted_width_histogram": {
+        "10": 48.666583607796014,
+        "11": 2.2808200321920107,
+        "12": 10.428041210596437,
+        "14": 12.802141713169588,
+        "15": 9.619412867560621,
+        "16": 12.226011225004472,
+        "9": 3.976989343680861
       },
       "total_forward_passes": 249,
       "w_critical_detected": 9,

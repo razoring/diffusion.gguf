@@ -729,6 +729,12 @@ static ServerConfig parse_server_args(int argc, char** argv) {
             else if (tp == "adaptive") cfg.default_params.tail_pruning = TailPruningMode::ADAPTIVE;
             else cfg.default_params.tail_pruning = TailPruningMode::OFF;
         }
+        else if (arg == "--commitment-policy") {
+            std::string cp = next_str("--commitment-policy");
+            if (cp == "prefix" || cp == "full") cfg.default_params.commitment_policy = CommitmentPolicy::FULL_PREFIX_FREEZE;
+            else if (cp == "uncommitted" || cp == "roving") cfg.default_params.commitment_policy = CommitmentPolicy::UNCOMMITTED_FRONTIER;
+            else cfg.default_params.commitment_policy = CommitmentPolicy::SOFT_FREEZE;
+        }
     }
 
     if (cfg.default_params.n_predict <= 128) {
@@ -922,6 +928,12 @@ static GenParams parse_request_params(const json& body, const GenParams& default
             if (tp == "strict" || tp == "aggressive") params.tail_pruning = TailPruningMode::AGGRESSIVE;
             else if (tp == "adaptive") params.tail_pruning = TailPruningMode::ADAPTIVE;
             else params.tail_pruning = TailPruningMode::OFF;
+        }
+        if (diff.contains("commitment_policy")) {
+            std::string cp = diff["commitment_policy"].get<std::string>();
+            if (cp == "prefix" || cp == "full") params.commitment_policy = CommitmentPolicy::FULL_PREFIX_FREEZE;
+            else if (cp == "uncommitted" || cp == "roving") params.commitment_policy = CommitmentPolicy::UNCOMMITTED_FRONTIER;
+            else params.commitment_policy = CommitmentPolicy::SOFT_FREEZE;
         }
     }
 

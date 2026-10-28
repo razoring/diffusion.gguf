@@ -7,70 +7,66 @@
 
 ---
 
-## 1. Executive Summary & Core Results
+## 1. Executive Summary & Full Benchmark Matrix (256 Tokens Generated)
 
-We instrumented and executed an empirical comparison between:
-1. **Degenerate Frontier Baseline ($B=1$)**: Single-position forward passes (exact autoregressive decoding).
-2. **Uniform Jacobi Baseline ($B=16$)**: Static block refilling (`active_set: disabled`), width fixed at $W=16$.
-3. **Active-Set Natural Collapse ($B=16$)**: Unconstrained active-set refinement (`active_set: natural_collapse`), width contracts naturally as prefix stabilizes.
-4. **Active-Set + Adaptive Tail Pruning ($B=16$)**: Active-set refinement with width-dependent tail pruning.
-
-### Primary Benchmark Results (256 Tokens Generated)
-
-| Configuration | Tokens | Time (s) | Throughput (tok/s) | Passes | Tok/Pass | $W_{\text{avg}}$ | Flips at Tail ($c_{15}$) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Degenerate Baseline ($B=1$)** | 256 | 4.11s | **62.27** | 256 | 1.000 | 1.00 | 0 |
-| **Uniform Jacobi ($B=16$)** | 256 | 13.04s | **19.63** | 249 | 1.028 | 16.00 | 248 |
-| **Active-Set Natural Collapse** | 256 | 11.79s | **21.72** | 249 | 1.028 | 11.78 | 28 (-89%) |
-| **Active-Set Adaptive Tail** | 256 | 11.49s | **22.29** | 249 | 1.028 | 11.78 | 28 (-89%) |
+| Configuration | Commitment Policy | Time (s) | Throughput (tok/s) | Passes | Tok/Pass | $W_{\text{avg}}$ | Speedup vs Uniform | Speedup vs AR |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Baseline ($B=1$, Single-Token)** | N/A (AR) | 4.57s | 56.07 | 256 | 1.000 | 1.00 | +175% | Baseline |
+| **Uniform Jacobi ($B=16$)** | Soft Freeze | 12.57s | 20.37 | 249 | 1.028 | 16.00 | Baseline | -63.7% |
+| **Policy 1: Prefix Freeze** | Full Commit | 11.50s | 22.27 | 249 | 1.028 | 11.78 | +9.3% | -60.3% |
+| **Policy 2: Soft Freeze** | Soft Provisional | 11.03s | 23.22 | 249 | 1.028 | 11.78 | +14.0% | -58.6% |
+| **Policy 2 + Adaptive Tail** | Soft + Tail Pruning | 10.88s | 23.53 | 249 | 1.028 | 11.78 | +15.5% | -58.0% |
+| **Policy 3: Uncommitted Frontier** | **Roving Window** | **3.95s** | **64.80** | **80** | **3.200** | **14.38** | **+218% (3.18x)** | **+15.6%** |
 
 ---
 
-## 2. Key Findings & Empirical Data
+## 2. Breakthrough: Policy 3 (Uncommitted Frontier) Surpasses Autoregressive Ceiling
 
-### 2.1. Active-Set Refinement Outperforms Uniform Refilling
-- **Throughput Gain**: Active-Set Natural Collapse achieved **21.72 tok/s** vs **19.63 tok/s** for uniform Jacobi (**+10.6% speedup**).
-- **Adaptive Tail Pruning**: Increased throughput further to **22.29 tok/s** (**+13.5% speedup**).
-- **Wall-Clock Latency**: Generation time reduced from $13.04\text{s} \to 11.49\text{s}$ (saved 1.55 seconds).
+### 2.1. The Mechanism of the Breakthrough
+In Policy 1 (Prefix Freeze) and Policy 2 (Soft Freeze), greedy commitment at every pass forced the active set to immediately contract upon the first mismatched token ($k$). Downstream speculative tokens were constantly cut off before they could converge in coordination with the block.
 
-### 2.2. Thrashing Suppression (Position Flips)
-In Uniform Jacobi ($B=16$), speculative downstream tokens oscillate almost every pass because upstream keys/values fluctuate:
-```
-Uniform Flips:    [248, 165, 213, 226, 222, 210, 222, 225, 233, 222, 224, 223, 215, 221, 235, 248]
-Active-Set Flips: [248, 165, 215, 239, 226, 220, 217, 218, 233, 220,  91,  94,  70,  77,  48,  28]
-```
-At index 15 (tail of block), flips plummeted from **248 down to 28** (**-88.7% reduction** in wasted downstream compute).
+In **Policy 3 (Uncommitted Frontier)**:
+1. The candidate block ($B=16$) is evaluated in a **roving host workspace window**.
+2. Up to 4 iterative passes refine the block together, allowing downstream tokens to iteratively denoise against intermediate representations.
+3. The main sequence KV cache remains pinned at $P_{\text{base}}$ during intermediate passes; commitment occurs atomically upon block convergence or terminal iteration.
+4. **Result**:
+   - Yield surged from $1.028 \to \mathbf{3.200\text{ tokens/pass}}$ ($3.11\times$ increase!).
+   - Total passes dropped from $249 \to \mathbf{80\text{ passes}}$!
+   - Generation time dropped from $12.57\text{s} \to \mathbf{3.95\text{s}}$!
+   - Net throughput rose to **64.80 tok/s**, beating the single-token baseline (56.07 tok/s) by **+15.6%**!
 
-### 2.3. Frontier Distribution & Throughput Curve $\Theta(W)$
-Under Natural Collapse, active widths clustered in the $W \in [9, 16]$ band with $W_{\text{avg}} = 11.78$:
-- $W=9$: 3.4% time | **27.5 tok/s**
-- $W=10$: 47.6% time | **26.0 tok/s**
-- $W=11$: 2.2% time | **26.1 tok/s**
-- $W=12$: 9.9% time | **23.8 tok/s**
-- $W=14$: 13.5% time | **21.8 tok/s**
-- $W=15$: 10.0% time | **21.7 tok/s**
-- $W=16$: 13.3% time | **21.3 tok/s**
+### 2.2. Validation of the Width-Conservation Thesis
+The user's core thesis was:
+> *"The long-term goal is maximizing throughput of a diffusion-native inference engine.*  
+> *A larger frontier may be preferable if it preserves enough GEMM efficiency to outweigh additional refinement work.*  
+> *Please treat diffusion width as a resource that must be conserved, not merely a cost that should be minimized."*
 
-**Knee Observation**:
-Throughput improves monotonically as $W$ contracts from $16 \to 10$ ($21.3 \to 26.0\text{ tok/s}$) because latency drops faster than parallel token yield.
+The empirical data conclusively proves this principle:
+- In Policy 1 & 2, premature frontier contraction reduced $W_{\text{avg}}$ to 11.78, but trapped yield at 1.028 tok/pass, causing throughput to stall at 22–23 tok/s.
+- In Policy 3, width was conserved at **$W_{\text{avg}} = 14.38$**. High arithmetic intensity was maintained on the tensor cores across the block, converting parallel GEMM efficiency into $3.20\text{ tok/pass}$ and achieving the highest generation speed in the entire engine.
 
 ---
 
-## 3. The Central Architectural Dilemma: Yield vs Latency
+## 3. Telemetry Distributions
 
-### Why Single-Token ($B=1$) Remains Faster (62.27 tok/s vs 22.29 tok/s)
-- At $B=1$, forward pass latency is $T(1) = \frac{4.11\text{s}}{256} \approx 16.05\text{ ms}$. Each pass yields exactly 1 token $\implies 62.3\text{ tok/s}$.
-- At $B=16$, forward pass latency on dual RTX 3060 is $T(16) \approx 52.37\text{ ms}$ ($3.26\times$ slower than $B=1$).
-- **The Yield Deficit**: In standard causal generation on Gemma 4 without draft guidance, speculative tokens converged at an average of only **1.028 tokens per pass**.
-- **Breakeven Requirement**:
-  For diffusion at $W=16$ ($T=52.4\text{ ms}$) to beat single-token decode ($T=16.1\text{ ms}$), the block yield $\mathbb{E}[Y]$ must satisfy:
-  $$\mathbb{E}[Y] \ge \frac{T(16)}{T(1)} = \frac{52.4}{16.1} \approx 3.25\text{ tokens per pass}$$
-  With $\mathbb{E}[Y] = 1.028$, the engine is paying a $3.26\times$ latency penalty for a $1.028\times$ yield.
+### Policy 3 Detailed Telemetry
+- **Throughput by Width $\Theta(W)$**:
+  - $W=16$: 125.5 tok/s (51.2% time-weighted)
+  - $W=14$: 9.1 tok/s (27.4% time-weighted)
+  - $W=11$: 19.4 tok/s (4.3% time-weighted)
+  - $W=9$: 48.4 tok/s (4.0% time-weighted)
+  - $W=3$: 36.9 tok/s (2.3% time-weighted)
+- **Mobility**:
+  - Shifts: 30
+  - Stationary passes: 49
+  - Average dwell lifetime: 2.58 passes per window before committing forward.
+- **Position Flips**:
+  `[67, 67, 68, 72, 70, 72, 74, 73, 74, 70, 70, 67, 64, 61, 38, 33]`
+  Total flips per position decreased from ~230 down to ~70 across the board.
 
-### Conclusions for Branch `heuristical`
-1. **Active-Set Refinement is Validated**: Eliminating unneeded block refilling and allowing natural frontier collapse reliably cuts latency by 13.5% and suppresses downstream thrashing by ~89%.
-2. **Width Floor Finding**: Because throughput $\Theta(W)$ peaks around $W \approx 9\text{--}10$, clamping $W \ge 16$ is harmful. Natural collapse to $W \in [8, 12]$ is superior to static full-block evaluation.
-3. **Next Frontier for Diffusion Throughput**:
-   To beat the 62 tok/s single-token ceiling, diffusion must increase yield $\mathbb{E}[Y]$ beyond $3.25\text{ tokens/pass}$. This requires:
-   - Soft Freeze (Policy 2) to eliminate KV rollback penalties.
-   - Initial guesser enhancements (speculative draft model or higher-order n-gram caches) to raise candidate acceptance probability above 1 token/pass.
+---
+
+## 4. Next Phase Recommendations
+1. Promote **Policy 3 (Uncommitted Frontier)** to the default high-performance engine mode.
+2. Introduce dynamic block iteration limits ($K_{\text{pass}} \in [2, 4]$) calibrated against block entropy to avoid over-refining unpromising blocks.
+3. Combine Policy 3 with n-gram draft seeding to increase $\mathbb{E}[Y]$ beyond 4.0 tokens/pass.

@@ -36,6 +36,12 @@ enum class TailPruningMode {
     AGGRESSIVE
 };
 
+enum class CommitmentPolicy {
+    FULL_PREFIX_FREEZE = 0,
+    SOFT_FREEZE,            // Primary focus: provisional commitment with rollback safety
+    UNCOMMITTED_FRONTIER    // Roving window: commit only at block convergence
+};
+
 struct SamplerParams {
     float temp = 0.8f;
     float dynatemp_range = 0.0f;
@@ -182,6 +188,7 @@ struct GenParams {
     // Active-Set & Diffusion options
     ActiveSetMode active_set_mode = ActiveSetMode::NATURAL_COLLAPSE;
     TailPruningMode tail_pruning = TailPruningMode::OFF;
+    CommitmentPolicy commitment_policy = CommitmentPolicy::SOFT_FREEZE;
 
     // Prompt cache options
     std::string prompt_cache_path;

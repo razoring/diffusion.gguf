@@ -263,6 +263,10 @@ GenResult SchedulerJacobi::run(
         uint64_t total_dwell_sum = 0;
         uint64_t dwell_count = 0;
 
+        int P_block_base = P;
+        int block_pass = 0;
+        const int max_uncommitted_block_passes = 4;
+
         while (!c.empty() && static_cast<int>(result.tokens.size()) < n_predict && result.iterations < max_iters) {
             result.iterations++;
             int B = static_cast<int>(c.size());
@@ -358,41 +362,67 @@ GenResult SchedulerJacobi::run(
             std::vector<int32_t> committed_this_step;
             bool should_stop = false;
 
-            for (int j = 0; j <= k; ++j) {
-                int32_t tok = c[j];
-                sampler_.accept(tok);
-                result.tokens.push_back(tok);
+            bool is_uncommitted = (params.commitment_policy == CommitmentPolicy::UNCOMMITTED_FRONTIER);
+            bool block_terminal = !is_uncommitted || (k == B - 1) || (block_pass + 1 >= max_uncommitted_block_passes);
 
-                if (tokenizer_.is_eog(tok)) {
-                    stop_reason = StopReason::EOG;
-                    should_stop = true;
-                    break;
-                }
+            if (block_terminal) {
+                for (int j = 0; j <= k; ++j) {
+                    int32_t tok = c[j];
+                    sampler_.accept(tok);
+                    result.tokens.push_back(tok);
 
-                committed_this_step.push_back(tok);
-                result.text += tokenizer_.piece(tok);
+                    if (tokenizer_.is_eog(tok)) {
+                        stop_reason = StopReason::EOG;
+                        should_stop = true;
+                        break;
+                    }
 
-                for (const auto& s : params.stop_strings) {
-                    if (!s.empty() && result.text.size() >= s.size()) {
-                        if (result.text.compare(result.text.size() - s.size(), s.size(), s) == 0) {
-                            result.text.resize(result.text.size() - s.size());
-                            stop_reason = StopReason::STOP_STRING;
-                            should_stop = true;
-                            break;
+                    committed_this_step.push_back(tok);
+                    result.text += tokenizer_.piece(tok);
+
+                    for (const auto& s : params.stop_strings) {
+                        if (!s.empty() && result.text.size() >= s.size()) {
+                            if (result.text.compare(result.text.size() - s.size(), s.size(), s) == 0) {
+                                result.text.resize(result.text.size() - s.size());
+                                stop_reason = StopReason::STOP_STRING;
+                                should_stop = true;
+                                break;
+                            }
                         }
                     }
-                }
-                if (should_stop) break;
+                    if (should_stop) break;
 
-                if (static_cast<int>(result.tokens.size()) >= n_predict) {
-                    stop_reason = StopReason::MAX_TOKENS;
-                    should_stop = true;
-                    break;
+                    if (static_cast<int>(result.tokens.size()) >= n_predict) {
+                        stop_reason = StopReason::MAX_TOKENS;
+                        should_stop = true;
+                        break;
+                    }
                 }
+
+                guesser_.update_ngram(committed_this_step);
+                running_history.insert(running_history.end(), committed_this_step.begin(), committed_this_step.end());
+
+                int committed_count = static_cast<int>(committed_this_step.size());
+                result.telemetry.width_tokens_committed[B] += committed_count;
+                result.telemetry.total_tokens_committed += committed_count;
+
+                if (is_uncommitted) {
+                    P_block_base += committed_count;
+                    P = P_block_base;
+                    block_pass = 0;
+                } else {
+                    P += committed_count;
+                }
+                if (committed_count < B) {
+                    backend_.kv_truncate(P, params.seq_id);
+                }
+            } else {
+                // UNCOMMITTED_FRONTIER: intermediate pass does not commit to sequence
+                // Rewind KV to block base for next pass
+                backend_.kv_truncate(P_block_base, params.seq_id);
+                P = P_block_base;
+                block_pass++;
             }
-
-            guesser_.update_ngram(committed_this_step);
-            running_history.insert(running_history.end(), committed_this_step.begin(), committed_this_step.end());
 
             auto t_now = std::chrono::steady_clock::now();
             double elapsed_s = std::chrono::duration<double>(t_now - t_start).count();
@@ -400,12 +430,6 @@ GenResult SchedulerJacobi::run(
             double tok_per_iter = static_cast<double>(result.tokens.size()) / result.iterations;
 
             int committed_count = static_cast<int>(committed_this_step.size());
-            result.telemetry.width_tokens_committed[B] += committed_count;
-            result.telemetry.total_tokens_committed += committed_count;
-            P += committed_count;
-            if (committed_count < B) {
-                backend_.kv_truncate(P, params.seq_id);
-            }
 
             if (should_stop) {
                 if (callback) {
@@ -444,20 +468,34 @@ GenResult SchedulerJacobi::run(
             }
 
             std::vector<int32_t> next_c;
-            if (k + 1 < static_cast<int>(p.size())) {
-                next_c.push_back(p[k + 1]);
+            if (is_uncommitted && !block_terminal) {
+                next_c.push_back(p[1]);
+                for (int r = 1; r < B; ++r) {
+                    if (r < static_cast<int>(reductions.size()) && reductions[r].top_token >= 0 &&
+                        reductions[r].top_token < backend_.n_vocab()) {
+                        next_c.push_back(reductions[r].top_token);
+                    } else if (r + 1 < static_cast<int>(p.size())) {
+                        next_c.push_back(p[r + 1]);
+                    } else {
+                        next_c.push_back(c[r]);
+                    }
+                }
             } else {
-                next_c.push_back(tokenizer_.pad_or_fallback());
-            }
+                if (k + 1 < static_cast<int>(p.size())) {
+                    next_c.push_back(p[k + 1]);
+                } else {
+                    next_c.push_back(tokenizer_.pad_or_fallback());
+                }
 
-            for (int r = k + 1; r < B && static_cast<int>(next_c.size()) < remaining_needed; ++r) {
-                if (r < static_cast<int>(reductions.size()) && reductions[r].top_token >= 0 &&
-                    reductions[r].top_token < backend_.n_vocab()) {
-                    next_c.push_back(reductions[r].top_token);
+                for (int r = k + 1; r < B && static_cast<int>(next_c.size()) < remaining_needed; ++r) {
+                    if (r < static_cast<int>(reductions.size()) && reductions[r].top_token >= 0 &&
+                        reductions[r].top_token < backend_.n_vocab()) {
+                        next_c.push_back(reductions[r].top_token);
+                    }
                 }
             }
 
-            bool block_finished = (k == B - 1) || next_c.empty();
+            bool block_finished = block_terminal && ((k == B - 1) || next_c.empty());
 
             if (params.active_set_mode == ActiveSetMode::DISABLED || block_finished) {
                 int open_slots = remaining_needed - static_cast<int>(next_c.size());
