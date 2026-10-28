@@ -50,11 +50,15 @@ add_library(diffusion_core STATIC
     src/llama/dist_positional.cpp
     src/os/os_tuning.cpp
     src/kernels/reduce_logits_cpu.cpp
+    src/kernels/diff_device_cpu.cpp
 )
 
 if (GGML_CUDA)
     enable_language(CUDA)
-    target_sources(diffusion_core PRIVATE src/kernels/reduce_logits_cuda.cu)
+    target_sources(diffusion_core PRIVATE 
+        src/kernels/reduce_logits_cuda.cu
+        src/kernels/diff_device.cu
+    )
     target_compile_definitions(diffusion_core PUBLIC DIFFUSION_USE_CUDA)
 endif()
 
@@ -96,16 +100,6 @@ target_link_libraries(diffusion-server PRIVATE diffusion_core cpp-httplib)
 if (WIN32)
     target_link_libraries(diffusion-server PRIVATE ws2_32)
 endif()
-
-
-# Converter executable
-add_executable(diffusion-convert
-    tools/convert/main.cpp
-    tools/convert/ggjt_reader.cpp
-    tools/convert/quant_repack.cpp
-    tools/convert/gguf_emit.cpp
-)
-target_link_libraries(diffusion-convert PRIVATE diffusion_core)
 
 
 enable_testing()

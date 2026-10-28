@@ -11,3 +11,10 @@ add_executable(test_jacobi_mock
 target_include_directories(test_jacobi_mock PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(test_jacobi_mock PRIVATE diffusion_core)
 add_test(NAME test_jacobi_mock COMMAND test_jacobi_mock)
+
+add_executable(test_diff_device
+    unit/test_diff_device.cu
+)
+target_include_directories(test_diff_device PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_diff_device PRIVATE diffusion_core)
+add_test(NAME test_diff_device COMMAND test_diff_device)
