@@ -69,8 +69,6 @@ GenResult SchedulerDiffusion::run(
     int M_max = (params.max_iters > 0 && params.max_iters <= 16) ? params.max_iters : default_max_diffusion_steps_;
     int max_iters = (params.max_iters > 0 && params.max_iters > 16) ? params.max_iters : (n_predict + 16);
 
-    std::cerr << "[DIFF DEBUG] run() start: prompt_len=" << prompt_len << " n_predict=" << n_predict << " B_target=" << B_target << "\n";
-
     // Ensure device buffer capacity accommodates block size
     if (!device_bufs_allocated_ || device_bufs_.capacity < static_cast<size_t>(B_target)) {
         if (device_bufs_allocated_) {
@@ -104,7 +102,6 @@ GenResult SchedulerDiffusion::run(
             prefill_logits = backend_.eval(effective_prompt.data() + prompt_len - 1, 1, prompt_len - 1, false, params.seq_id);
         }
     }
-    std::cerr << "[DIFF DEBUG] prefill done\n";
 
     // Ensure device buffer capacity accommodates block size and matches the active output GPU device
     int cur_device = kernels::diff_device_get_current_device();

@@ -15,6 +15,8 @@ struct SystemProfile {
 
     int gpu_count = 0;
     std::string primary_gpu_name;
+    size_t primary_gpu_vram_bytes = 0;
+    size_t primary_gpu_free_vram_bytes = 0;
     size_t total_vram_bytes = 0;
     size_t free_vram_bytes = 0;
 };

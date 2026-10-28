@@ -19,12 +19,16 @@ void query_cuda_specs(SystemProfile& profile) {
         if (cudaGetDeviceProperties(&prop, i) == cudaSuccess) {
             if (i == 0) {
                 profile.primary_gpu_name = prop.name;
+                profile.primary_gpu_vram_bytes = prop.totalGlobalMem;
             }
             profile.total_vram_bytes += prop.totalGlobalMem;
         }
         size_t free_b = 0, total_b = 0;
         cudaSetDevice(i);
         if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
+            if (i == 0) {
+                profile.primary_gpu_free_vram_bytes = free_b;
+            }
             profile.free_vram_bytes += free_b;
         }
     }

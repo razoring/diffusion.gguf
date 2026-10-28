@@ -77,11 +77,15 @@ void RenderLive::clear_tail() {
 }
 
 bool RenderLive::on_step(const StepEvent& ev) {
-    if (!is_tty_) {
+    if (!is_tty_ || ev.canvas.size() <= 1) {
         for (int32_t tok : ev.committed_new) {
             std::cout << tokenizer_.piece(tok);
         }
         std::cout.flush();
+        if (ev.done) {
+            std::cout << "\n";
+            std::cout.flush();
+        }
         return true;
     }
 

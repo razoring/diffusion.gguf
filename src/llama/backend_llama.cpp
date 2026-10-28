@@ -20,8 +20,18 @@ static enum ggml_type parse_ggml_type(const std::string& s) {
     return GGML_TYPE_F16;
 }
 
+static void backend_log_callback(enum ggml_log_level level, const char* text, void* user_data) {
+    (void)user_data;
+    if (level < GGML_LOG_LEVEL_INFO) {
+        return;
+    }
+    fputs(text, stderr);
+    fflush(stderr);
+}
+
 BackendLlama::BackendLlama(const BackendConfig& config) {
     llama_backend_init();
+    llama_log_set(backend_log_callback, nullptr);
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = config.n_gpu_layers;

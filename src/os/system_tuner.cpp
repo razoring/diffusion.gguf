@@ -79,12 +79,12 @@ void auto_tune_system(
         } catch (...) {}
     }
 
-    // 1. Diffusion defaults: Must be native block diffusion (B=8, M=3)
+    // 1. Generation defaults: Act like autoregressive token-by-token generation (B=1)
     if (!flags.block_size) {
-        params.block_size = 8;
+        params.block_size = 1;
     }
     if (!flags.diffusion_steps) {
-        params.diffusion_steps = 3;
+        params.diffusion_steps = 1;
     }
 
     // 2. GPU Offloading and VRAM budget
@@ -104,12 +104,20 @@ void auto_tune_system(
         }
     }
 
-    // 3. Multi-GPU split mode
+    // 3. Multi-GPU split mode: Avoid PCIe bus penalty when single GPU VRAM accommodates model + KV
     if (!flags.split_mode) {
-        if (sys.gpu_count > 1 && backend.n_gpu_layers > 0) {
-            backend.split_mode = 1; // LLAMA_SPLIT_MODE_LAYER across all GPUs
+        size_t primary_vram = (sys.primary_gpu_free_vram_bytes > 0)
+            ? sys.primary_gpu_free_vram_bytes
+            : (sys.primary_gpu_vram_bytes > 0 ? sys.primary_gpu_vram_bytes : sys.free_vram_bytes);
+
+        int ctx = (backend.n_ctx > 0) ? backend.n_ctx : 2048;
+        size_t est_kv_bytes = static_cast<size_t>(ctx) * 64ULL * 1024ULL;
+        size_t est_total_needed = model_bytes + est_kv_bytes + (512ULL * 1024 * 1024);
+
+        if (sys.gpu_count > 1 && backend.n_gpu_layers > 0 && primary_vram < est_total_needed) {
+            backend.split_mode = 1; // LLAMA_SPLIT_MODE_LAYER across GPUs
         } else {
-            backend.split_mode = 0; // Single GPU or none
+            backend.split_mode = 0; // LLAMA_SPLIT_MODE_NONE (keep on primary GPU to avoid PCIe transfer overhead)
         }
     }
 
