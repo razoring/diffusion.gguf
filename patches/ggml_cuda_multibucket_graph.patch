@@ -1,0 +1,19 @@
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 0878ab9..ae47863 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2432,7 +2432,13 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
+ }
+ 
+ static const void * ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
+-    return cgraph->nodes[0];
++    if (!cgraph || cgraph->n_nodes == 0) return nullptr;
++    // Multi-bucket key: distinguish graph topology by base node, node count, and batch dimension
++    uintptr_t base = reinterpret_cast<uintptr_t>(cgraph->nodes[0]);
++    uintptr_t n_nodes = static_cast<uintptr_t>(cgraph->n_nodes);
++    uintptr_t n_tokens = static_cast<uintptr_t>(cgraph->nodes[0]->ne[1]);
++    uintptr_t key = base ^ (n_nodes << 20) ^ (n_tokens << 8);
++    return reinterpret_cast<const void *>(key);
+ }
+ 
+ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {

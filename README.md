@@ -1,1 +1,120 @@
-TBD
+# diffusion.gguf
+
+High-throughput, block-parallel diffusion inference engine for standard GGUF autoregressive language models.
+
+---
+
+## 1. Overview
+
+`diffusion.gguf` transforms standard causal autoregressive language models (such as Gemma, LLaMA, Qwen) into parallel block-diffusion generators without retraining.
+
+Instead of decoding strictly token-by-token ($B=1$), the engine predicts contiguous token blocks ($B=4$ to $B=8$) across iterative multi-pass diffusion refinement schedules.
+
+### Key Performance Innovations:
+- **True Sparse Active Query Execution:** When active tokens converge across diffusion passes ($N=8 \to N=4 \to N=1$), backbone GEMMs and attention kernels execute *only* over active positions while reusing frozen prefix tokens directly from the KV cache.
+- **KV Anchor Locking:** Zero cache recomputation for stationary prefixes. `kv_truncate` rewinds uncommitted active tail slots before evaluating sparse wavefronts.
+- **Multi-Bucket CUDA Graph Caching:** Eliminates CUDA graph recreation overhead when switching between variable active query batch sizes ($N \in \{1, 4, 8\}$).
+- **Zero-Speculation Guarantee:** No draft models, no speculative tree verification, no autoregressive batch drafting.
+
+**Measured Result:** On Gemma 4 E4B Q4_K_M (dual RTX 3060), 3-pass block diffusion drops generation latency from $153.0\text{ ms} \to 109.1\text{ ms}$, achieving **73.33 tok/s** (+19.5% faster than baseline autoregressive llama.cpp at 61.35 tok/s).
+
+---
+
+## 2. Architecture & Directory Layout
+
+```
+diffusion.gguf/
+├── CMakeLists.txt        # Top-level build configuration
+├── include/              # Public engine headers
+├── src/
+│   ├── engine.h / .cpp   # Top-level generation coordinator
+│   ├── scheduler_diffusion.h / .cpp # Multi-pass block scheduler
+│   ├── scheduler_jacobi.h / .cpp    # Jacobi parallel scheduler
+│   ├── context_trie.h / .cpp        # Context n-gram lookup
+│   ├── init_guess.h / .cpp          # Block initialization heuristics
+│   ├── fast_math.h       # Fast log/entropy approximations
+│   ├── kernels/          # CUDA / CPU reduction & diff kernels
+│   └── llama/            # Clean backend wrapper for llama.cpp runtime
+├── tools/
+│   ├── cli/              # diffusion-cli interactive & batch generator
+│   └── server/           # diffusion-server HTTP endpoint
+├── patches/              # Differential patches for third_party dependencies
+│   ├── ggml_cuda_multibucket_graph.patch # Multi-bucket graph key
+│   └── llama_context_mrope_update.patch  # Context memory update
+├── scripts/
+│   ├── apply_patches.ps1 # Windows patch applicator
+│   └── apply_patches.sh  # Unix patch applicator
+├── tests/
+│   └── unit/             # Profilers & regression tests
+└── third_party/
+    └── llama.cpp         # Clean upstream dependency (submodule)
+```
+
+---
+
+## 3. Getting Started
+
+### Prerequisites
+- CMake 3.18+
+- C++17 compliant compiler (MSVC 2022 / Clang / GCC)
+- CUDA Toolkit 12.x+ (for CUDA acceleration)
+- Git
+
+### Cloning & Applying Patches
+External dependencies in `third_party/` remain pristine in source control. Build-time patches must be applied after checkout:
+
+```bash
+# Clone repository with submodules
+git clone --recurse-submodules https://github.com/your-org/diffusion.gguf.git
+cd diffusion.gguf
+
+# Apply patches to third_party dependencies:
+# On Windows (PowerShell):
+powershell -ExecutionPolicy Bypass -File scripts/apply_patches.ps1
+
+# On Linux / macOS (Bash):
+bash scripts/apply_patches.sh
+```
+
+### Building
+
+Using CMake and Ninja:
+```bash
+cmake -B build -G Ninja -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+---
+
+## 4. Usage
+
+### Interactive CLI (`diffusion-cli`)
+
+```bash
+./build/bin/diffusion-cli \
+    -m ./models/gemma-4-e4b-it-Q4_K_M.gguf \
+    -p "Explain quantum computing in three sentences:" \
+    -ngl 99 \
+    --block-size 8 \
+    --max-passes 3
+```
+
+Key arguments:
+- `-m, --model <path>`: Path to GGUF model file.
+- `-p, --prompt <text>`: Prompt string.
+- `-ngl <n>`: Number of layers to offload to GPU.
+- `--block-size <n>`: Diffusion block width (recommended: 4 to 8).
+- `--max-passes <n>`: Maximum refinement passes per block (default: 3).
+
+---
+
+## 5. Benchmarks & Testing
+
+Run unit tests and sparse graph transition verification:
+```bash
+# Verify sparse wavefront execution & numerical stability
+./build/bin/test_sparse_graph_transitions
+
+# Measure subsystem latency breakdown across block sizes
+./build/bin/test_latency_breakdown
+```
