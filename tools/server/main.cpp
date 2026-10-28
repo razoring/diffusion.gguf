@@ -714,8 +714,11 @@ static ServerConfig parse_server_args(int argc, char** argv) {
             std::string s = next_str("--init");
             if (s == "random") cfg.default_params.init_strategy = InitStrategy::RANDOM;
             else if (s == "pad") cfg.default_params.init_strategy = InitStrategy::PAD;
-            else cfg.default_params.init_strategy = InitStrategy::NGRAM;
-        } else if (arg == "--temp") cfg.default_params.sampling.temp = next_float("--temp");
+            else if (s == "ngram") cfg.default_params.init_strategy = InitStrategy::NGRAM;
+            else cfg.default_params.init_strategy = InitStrategy::ADAPTIVE_ENTROPY;
+        } else if (arg == "--annealed-attn") cfg.default_params.annealed_attention = true;
+        else if (arg == "--no-annealed-attn") cfg.default_params.annealed_attention = false;
+        else if (arg == "--temp") cfg.default_params.sampling.temp = next_float("--temp");
         else if (arg == "--top-p") cfg.default_params.sampling.top_p = next_float("--top-p");
         else if (arg == "--top-k") cfg.default_params.sampling.top_k = next_int("--top-k");
     }
@@ -904,8 +907,10 @@ static GenParams parse_request_params(const json& body, const GenParams& default
             std::string init = diff["init"].get<std::string>();
             if (init == "random") params.init_strategy = InitStrategy::RANDOM;
             else if (init == "pad") params.init_strategy = InitStrategy::PAD;
-            else params.init_strategy = InitStrategy::NGRAM;
+            else if (init == "ngram") params.init_strategy = InitStrategy::NGRAM;
+            else params.init_strategy = InitStrategy::ADAPTIVE_ENTROPY;
         }
+        if (diff.contains("annealed_attention")) params.annealed_attention = diff["annealed_attention"].get<bool>();
     }
 
     return params;
