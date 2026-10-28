@@ -96,7 +96,7 @@ struct GenParams {
     int32_t max_iters = 0; // 0 = default (n_predict + 8)
 
     // Hybrid Annealed Diffusion Attention & K=2 Branch Budget
-    bool annealed_attention = true;
+    bool annealed_attention = false;
     float entropy_fork_threshold = 0.85f;
     float entropy_det_threshold = 0.40f;
     float max_branch_ratio = 0.20f; // 100-block sliding window budget controller (max 20% branching)
