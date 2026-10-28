@@ -106,6 +106,63 @@ Key arguments:
 - `--block-size <n>`: Diffusion block width (recommended: 4 to 8).
 - `--max-passes <n>`: Maximum refinement passes per block (default: 3).
 
+### Diffusion Server (`diffusion-server`)
+
+OpenAI-compatible HTTP chat completion endpoint supporting streaming, tool-calling, and block diffusion:
+
+```bash
+./build/bin/diffusion-server \
+    -m ./models/gemma-4-e4b-it-Q4_K_M.gguf \
+    -ngl 99 \
+    --host 127.0.0.1 \
+    --port 8080 \
+    --block-size 8 \
+    -c 2048
+```
+
+#### Complete Server CLI Arguments Reference:
+
+| Argument | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **Model & Hardware** | | | |
+| `-m, --model PATH` | `string` | *(Required)* | Path to GGUF model file |
+| `-c, --ctx-size N` | `int` | `2048` | KV context size in tokens |
+| `-ngl, --n-gpu-layers N` | `int` | `0` | Number of model layers offloaded to GPU |
+| `-t, --threads N` | `int` | `4` | Number of CPU compute threads |
+| `-b, --batch-size N` | `int` | `2048` | Logical batch size |
+| `-ub, --ubatch-size N` | `int` | `512` | Micro-batch size |
+| `-fa, --flash-attn [on\|off\|auto]` | `string/flag` | `auto` | Enable Flash Attention |
+| `--no-flash-attn` | `flag` | `false` | Explicitly disable Flash Attention |
+| `--kv-unified` / `--no-kv-unified`| `flag` | `true` | Enable/disable unified KV buffer |
+| `--no-mmap` | `flag` | `false` | Disable memory mapping for model weights |
+| `--mlock` | `flag` | `false` | Lock model memory in RAM |
+| `--numa MODE` | `string` | `""` | NUMA memory node optimization mode |
+| `--cache-type-k TYPE` | `string` | `f16` | KV cache data type for K (`f16`, `q8_0`, `q4_0`) |
+| `--cache-type-v TYPE` | `string` | `f16` | KV cache data type for V (`f16`, `q8_0`, `q4_0`) |
+| `--lora PATH` | `string` | `""` | Path to LoRA adapter to apply |
+| `-sm, --split-mode MODE` | `string` | `layer` | Multi-GPU split mode (`none`, `layer`, `row`, `tensor`) |
+| `-ts, --tensor-split SPLIT` | `string` | `""` | Comma-separated GPU VRAM split ratios |
+| `--main-gpu INDEX` | `int` | `0` | Device index of primary GPU |
+| **Networking & Concurrency** | | | |
+| `--host HOST` | `string` | `127.0.0.1` | Network interface address to listen on |
+| `--port PORT` | `int` | `8080` | TCP port to bind server |
+| `-np, --parallel N` | `int` | `1` | Number of concurrent slots / parallel sequences |
+| `--api-key KEY` | `string` | `""` | Optional Bearer API key authentication |
+| **Diffusion & Generation Defaults** | | | |
+| `--mode MODE` | `string` | `block` | Decoding mode: `block` or `whole` (`ar` is removed) |
+| `-n, --n-predict N` | `int` | `2048` | Default max generation tokens per request |
+| `--block, --block-size, -b N` | `int` | `32` | Jacobi / diffusion block size |
+| `--diffusion-steps, --diff-steps N` | `int` | `3` | Refinement passes per block |
+| `--whole-max N` | `int` | `512` | Maximum canvas size in `whole` mode |
+| `--init STRATEGY` | `string` | `adaptive` | Initial guess strategy (`ngram`, `random`, `pad`, `adaptive`) |
+| `--annealed-attn` / `--no-annealed-attn` | `flag` | `false` | Enable/disable progressive attention annealing |
+| `--speculative, --speculative-mode` | `flag` | `false` | Toggle speculative block evaluation |
+| `--temp FLOAT` | `float` | `0.8` | Default sampling temperature |
+| `--top-p FLOAT` | `float` | `0.95` | Default Top-p nucleus sampling |
+| `--top-k N` | `int` | `40` | Default Top-k sampling filter |
+| `-v, --version` | `flag` | - | Display version and exit |
+| `-h, --help` | `flag` | - | Show help message and exit |
+
 ---
 
 ## 5. Benchmarks & Testing
