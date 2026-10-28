@@ -327,36 +327,30 @@ GenResult SchedulerJacobi::run(
             std::vector<kernels::LogitsReduction> reductions(B);
             kernels::reduce_logits_cpu(L.row(0), backend_.n_vocab(), B, reductions.data());
 
-            std::vector<int32_t> p(B + 1);
-            p[0] = c[0];
-            std::vector<float> conf(B + 1, 0.0f);
-            conf[0] = 1.0f;
+            std::vector<int32_t> row_pred(B);
+            std::vector<float> row_conf(B, 0.0f);
 
             auto st = sampler_.clone();
             st->accept(c[0]);
 
-            int k = 0;
-            if (params.sampling.temp == 0.0f && !reductions.empty() && reductions[0].top_token >= 0) {
-                p[1] = reductions[0].top_token;
-                conf[1] = 1.0f;
-            } else {
-                p[1] = st->sample(L.row(0), P + 1, &conf[1]);
+            for (int r = 0; r < B; ++r) {
+                if (params.sampling.temp == 0.0f && r < static_cast<int>(reductions.size()) && reductions[r].top_token >= 0) {
+                    row_pred[r] = reductions[r].top_token;
+                    row_conf[r] = 1.0f;
+                } else {
+                    row_pred[r] = st->sample(L.row(r), P + r + 1, &row_conf[r]);
+                }
             }
 
+            int k = 0;
             for (int i = 0; i + 1 < B; ++i) {
-                bool matched = (c[i + 1] == p[i + 1]);
+                bool matched = (c[i + 1] == row_pred[i]);
                 if (!matched || !st->can_accept(c[i + 1])) {
                     break;
                 }
 
                 k++;
                 st->accept(c[i + 1]);
-                if (params.sampling.temp == 0.0f && i + 1 < static_cast<int>(reductions.size()) && reductions[i + 1].top_token >= 0) {
-                    p[i + 2] = reductions[i + 1].top_token;
-                    conf[i + 2] = 1.0f;
-                } else {
-                    p[i + 2] = st->sample(L.row(i + 1), P + i + 2, &conf[i + 2]);
-                }
             }
 
             std::vector<int32_t> committed_this_step;
@@ -469,30 +463,15 @@ GenResult SchedulerJacobi::run(
 
             std::vector<int32_t> next_c;
             if (is_uncommitted && !block_terminal) {
-                next_c.push_back(p[1]);
+                // Retain anchor c[0] at index 0 for P_block_base
+                next_c.push_back(c[0]);
                 for (int r = 1; r < B; ++r) {
-                    if (r < static_cast<int>(reductions.size()) && reductions[r].top_token >= 0 &&
-                        reductions[r].top_token < backend_.n_vocab()) {
-                        next_c.push_back(reductions[r].top_token);
-                    } else if (r + 1 < static_cast<int>(p.size())) {
-                        next_c.push_back(p[r + 1]);
-                    } else {
-                        next_c.push_back(c[r]);
-                    }
+                    next_c.push_back(row_pred[r - 1]);
                 }
             } else {
-                if (k + 1 < static_cast<int>(p.size())) {
-                    next_c.push_back(p[k + 1]);
-                } else {
-                    next_c.push_back(tokenizer_.pad_or_fallback());
-                }
-
-                for (int r = k + 1; r < B && static_cast<int>(next_c.size()) < remaining_needed; ++r) {
-                    if (r < static_cast<int>(reductions.size()) && reductions[r].top_token >= 0 &&
-                        reductions[r].top_token < backend_.n_vocab()) {
-                        next_c.push_back(reductions[r].top_token);
-                    }
-                }
+                // Block terminal: anchor next block with prediction following committed prefix
+                int32_t next_anchor = (k < B && row_pred[k] >= 0) ? row_pred[k] : tokenizer_.pad_or_fallback();
+                next_c.push_back(next_anchor);
             }
 
             bool block_finished = block_terminal && ((k == B - 1) || next_c.empty());
@@ -508,10 +487,6 @@ GenResult SchedulerJacobi::run(
                         next_c.push_back(g);
                         if (static_cast<int>(next_c.size()) >= remaining_needed) break;
                     }
-                }
-
-                while (static_cast<int>(next_c.size()) < remaining_needed) {
-                    next_c.push_back(next_c.back());
                 }
             } else {
                 // Active-Set Natural Collapse: retain uncommitted candidates without refilling.
