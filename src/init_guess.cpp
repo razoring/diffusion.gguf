@@ -24,9 +24,11 @@ void NgramPool::train(const std::vector<int32_t>& tokens) {
                 if (static_cast<int>(table_.size()) >= max_entries_) break;
                 uint64_t h = hash_prefix(&tokens[i], order - 1);
                 int32_t next_tok = tokens[i + order - 1];
-                auto& list = table_[h];
-                if (std::find(list.begin(), list.end(), next_tok) == list.end()) {
-                    list.push_back(next_tok);
+                auto& tr = table_[h];
+                int cnt = ++tr.counts[next_tok];
+                if (cnt > tr.best_count) {
+                    tr.best_count = cnt;
+                    tr.best_tok = next_tok;
                 }
             }
         }
@@ -43,8 +45,8 @@ int32_t NgramPool::predict(const std::vector<int32_t>& context, int32_t fallback
             const int32_t* ptr = context.data() + (ctx_len - prefix_len);
             uint64_t h = hash_prefix(ptr, prefix_len);
             auto it = table_.find(h);
-            if (it != table_.end() && !it->second.empty()) {
-                return it->second.back();
+            if (it != table_.end() && it->second.best_tok >= 0) {
+                return it->second.best_tok;
             }
         }
     }
@@ -120,8 +122,8 @@ std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int3
 
     // In NGRAM or ADAPTIVE_ENTROPY mode (native self-diffusion), match high-confidence chained phrases
     if ((strategy_ == InitStrategy::NGRAM || strategy_ == InitStrategy::ADAPTIVE_ENTROPY) && !context.empty()) {
-        // 1. High-confidence chained phrase match from ContextTrie (order down to 1)
-        auto phrase = context_trie_.chain_match(context, count, 1);
+        // 1. High-confidence chained phrase match from ContextTrie (order down to 2)
+        auto phrase = context_trie_.chain_match(context, count, 2);
         for (int32_t tok : phrase) {
             if (tokenizer_.is_eog(tok)) break;
             guesses.push_back(tok);
@@ -156,8 +158,15 @@ std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int3
         // 4. Keep batch size strictly static: pad open slots so CUDA graph warmup never resets
         int needed = count - static_cast<int>(guesses.size());
         if (needed > 0) {
-            int32_t pad_tok = guesses.empty() ? context.back() : guesses.back();
-            if (tokenizer_.is_eog(pad_tok)) pad_tok = fallback_pad;
+            int32_t pad_tok = fallback_pad;
+            if (!guesses.empty()) {
+                pad_tok = guesses.back();
+            } else if (!context.empty()) {
+                int32_t pred = ngram_pool_.predict(context, -1);
+                if (pred >= 0 && !tokenizer_.is_eog(pred)) {
+                    pad_tok = pred;
+                }
+            }
             for (int i = 0; i < needed; ++i) {
                 guesses.push_back(pad_tok);
             }

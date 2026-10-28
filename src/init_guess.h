@@ -15,16 +15,21 @@ namespace diffusion {
 
 class NgramPool {
 public:
-    NgramPool(int n = 3, int max_entries = 4096);
+    NgramPool(int n = 3, int max_entries = 16384);
 
     void train(const std::vector<int32_t>& tokens);
     int32_t predict(const std::vector<int32_t>& context, int32_t fallback) const;
 
 private:
+    struct Transition {
+        int32_t best_tok = -1;
+        int32_t best_count = 0;
+        std::unordered_map<int32_t, int32_t> counts;
+    };
+
     int n_ = 3;
-    int max_entries_ = 4096;
-    // Map prefix hash -> list of follow tokens
-    std::unordered_map<uint64_t, std::vector<int32_t>> table_;
+    int max_entries_ = 16384;
+    std::unordered_map<uint64_t, Transition> table_;
 
     uint64_t hash_prefix(const int32_t* toks, int len) const;
 };
