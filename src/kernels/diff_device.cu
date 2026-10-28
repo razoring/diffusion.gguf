@@ -9,78 +9,146 @@
 namespace diffusion {
 namespace kernels {
 
-// Kernel 1: Categorical reduction over active query positions
+// Kernel 1: Categorical reduction over active query positions with PTX warp-shuffle & entropy
 __global__ void diff_sample_and_anchor_kernel(
     const float* __restrict__ logits,          // [W_active, n_vocab]
     const int32_t* __restrict__ active_indices,// [W_active] -> maps to canvas index b
     int32_t* __restrict__ canvas_out,          // [B]
     float* __restrict__ confidences,           // [B]
+    float* __restrict__ entropies,             // [B]
     uint8_t* __restrict__ frozen_mask,         // [B]
+    float* __restrict__ logits_ema,            // [B, n_vocab] optional EMA buffer
+    float momentum_beta,
     size_t W_active,
     size_t n_vocab,
     float freeze_threshold
 ) {
-    size_t r = blockIdx.x; // Row index in active queries
+    size_t r = blockIdx.x;
     if (r >= W_active) return;
 
-    int32_t b = active_indices[r]; // Target position in canvas [0, B-1]
+    int32_t b = active_indices ? active_indices[r] : static_cast<int32_t>(r);
     const float* row = logits + (r * n_vocab);
+    float* row_ema = logits_ema ? (logits_ema + (b * n_vocab)) : nullptr;
     int tid = threadIdx.x;
 
-    // Phase 1: Block tree reduction for max logit and argmax token ID
-    __shared__ float s_max_val[512];
-    __shared__ int32_t s_max_idx[512];
-
+    // Phase 1: Local register scan for max logit and argmax index
     float local_max = -1e30f;
     int32_t local_idx = 0;
 
     for (size_t v = tid; v < n_vocab; v += blockDim.x) {
         float val = row[v];
+        if (row_ema && momentum_beta > 0.0f) {
+            val = momentum_beta * row_ema[v] + (1.0f - momentum_beta) * val;
+            row_ema[v] = val;
+        }
         if (val > local_max) {
             local_max = val;
             local_idx = static_cast<int32_t>(v);
         }
     }
 
-    s_max_val[tid] = local_max;
-    s_max_idx[tid] = local_idx;
+    // Warp-level reduction using PTX __shfl_down_sync
+    unsigned int mask = 0xffffffff;
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        float other_max = __shfl_down_sync(mask, local_max, offset);
+        int32_t other_idx = __shfl_down_sync(mask, local_idx, offset);
+        if (other_max > local_max) {
+            local_max = other_max;
+            local_idx = other_idx;
+        }
+    }
+
+    // Block-level reduction across warps (up to 32 warps = 1024 threads)
+    __shared__ float s_max_val[32];
+    __shared__ int32_t s_max_idx[32];
+
+    int lane = tid % 32;
+    int warp_id = tid / 32;
+
+    if (lane == 0) {
+        s_max_val[warp_id] = local_max;
+        s_max_idx[warp_id] = local_idx;
+    }
     __syncthreads();
 
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            if (s_max_val[tid + stride] > s_max_val[tid]) {
-                s_max_val[tid] = s_max_val[tid + stride];
-                s_max_idx[tid] = s_max_idx[tid + stride];
+    if (warp_id == 0) {
+        int num_warps = blockDim.x / 32;
+        float b_max = (lane < num_warps) ? s_max_val[lane] : -1e30f;
+        int32_t b_idx = (lane < num_warps) ? s_max_idx[lane] : 0;
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            float other_max = __shfl_down_sync(mask, b_max, offset);
+            int32_t other_idx = __shfl_down_sync(mask, b_idx, offset);
+            if (other_max > b_max) {
+                b_max = other_max;
+                b_idx = other_idx;
             }
         }
-        __syncthreads();
+        if (lane == 0) {
+            s_max_val[0] = b_max;
+            s_max_idx[0] = b_idx;
+        }
     }
+    __syncthreads();
 
     float max_logit = s_max_val[0];
     int32_t best_token = s_max_idx[0];
 
-    // Phase 2: Compute softmax denominator for confidence estimate
+    // Phase 2: Compute softmax denominator and Shannon entropy
     float local_sum_exp = 0.0f;
+    float local_sum_z_exp = 0.0f;
+
     for (size_t v = tid; v < n_vocab; v += blockDim.x) {
-        local_sum_exp += __expf(row[v] - max_logit);
+        float val = (row_ema && momentum_beta > 0.0f) ? row_ema[v] : row[v];
+        float exp_diff = __expf(val - max_logit);
+        local_sum_exp += exp_diff;
+        local_sum_z_exp += (val - max_logit) * exp_diff;
     }
 
-    __shared__ float s_sum_exp[512];
-    s_sum_exp[tid] = local_sum_exp;
+    // Warp-level sum reduction
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        local_sum_exp += __shfl_down_sync(mask, local_sum_exp, offset);
+        local_sum_z_exp += __shfl_down_sync(mask, local_sum_z_exp, offset);
+    }
+
+    __shared__ float s_sum_exp[32];
+    __shared__ float s_sum_z_exp[32];
+
+    if (lane == 0) {
+        s_sum_exp[warp_id] = local_sum_exp;
+        s_sum_z_exp[warp_id] = local_sum_z_exp;
+    }
     __syncthreads();
 
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            s_sum_exp[tid] += s_sum_exp[tid + stride];
+    if (warp_id == 0) {
+        int num_warps = blockDim.x / 32;
+        float b_sum_exp = (lane < num_warps) ? s_sum_exp[lane] : 0.0f;
+        float b_sum_z_exp = (lane < num_warps) ? s_sum_z_exp[lane] : 0.0f;
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            b_sum_exp += __shfl_down_sync(mask, b_sum_exp, offset);
+            b_sum_z_exp += __shfl_down_sync(mask, b_sum_z_exp, offset);
         }
-        __syncthreads();
+        if (lane == 0) {
+            s_sum_exp[0] = b_sum_exp;
+            s_sum_z_exp[0] = b_sum_z_exp;
+        }
     }
+    __syncthreads();
 
     if (tid == 0) {
         float sum_exp = s_sum_exp[0];
+        float sum_z_exp = s_sum_z_exp[0];
         float confidence = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 1.0f;
+        float entropy = (sum_exp > 0.0f) ? (__logf(sum_exp) - (sum_z_exp / sum_exp)) : 0.0f;
+
         canvas_out[b] = best_token;
         confidences[b] = confidence;
+        if (entropies) entropies[b] = entropy;
 
         if (confidence >= freeze_threshold) {
             frozen_mask[b] = 1; // Newly frozen anchor
@@ -135,9 +203,10 @@ __global__ void diff_check_convergence_kernel(
     }
 }
 
-bool diff_device_alloc(DeviceDiffusionBuffers& bufs, size_t max_block_size) {
+bool diff_device_alloc(DeviceDiffusionBuffers& bufs, size_t max_block_size, size_t n_vocab) {
     diff_device_free(bufs);
     bufs.capacity = max_block_size;
+    bufs.n_vocab = n_vocab;
 
     cudaError_t err;
     err = cudaMalloc(&bufs.d_canvas_in, max_block_size * sizeof(int32_t));
@@ -147,6 +216,9 @@ bool diff_device_alloc(DeviceDiffusionBuffers& bufs, size_t max_block_size) {
     if (err != cudaSuccess) { diff_device_free(bufs); return false; }
 
     err = cudaMalloc(&bufs.d_confidences, max_block_size * sizeof(float));
+    if (err != cudaSuccess) { diff_device_free(bufs); return false; }
+
+    err = cudaMalloc(&bufs.d_entropies, max_block_size * sizeof(float));
     if (err != cudaSuccess) { diff_device_free(bufs); return false; }
 
     err = cudaMalloc(&bufs.d_frozen_mask, max_block_size * sizeof(uint8_t));
@@ -161,6 +233,15 @@ bool diff_device_alloc(DeviceDiffusionBuffers& bufs, size_t max_block_size) {
     err = cudaMalloc(&bufs.d_active_count, sizeof(int32_t));
     if (err != cudaSuccess) { diff_device_free(bufs); return false; }
 
+    if (n_vocab > 0) {
+        err = cudaMalloc(&bufs.d_logits, max_block_size * n_vocab * sizeof(float));
+        if (err != cudaSuccess) { diff_device_free(bufs); return false; }
+
+        err = cudaMalloc(&bufs.d_logits_ema, max_block_size * n_vocab * sizeof(float));
+        if (err != cudaSuccess) { diff_device_free(bufs); return false; }
+        cudaMemset(bufs.d_logits_ema, 0, max_block_size * n_vocab * sizeof(float));
+    }
+
     cudaMemset(bufs.d_frozen_mask, 0, max_block_size * sizeof(uint8_t));
     cudaMemset(bufs.d_converged, 0, sizeof(int32_t));
     cudaMemset(bufs.d_active_count, 0, sizeof(int32_t));
@@ -171,11 +252,17 @@ void diff_device_free(DeviceDiffusionBuffers& bufs) {
     if (bufs.d_canvas_in) { cudaFree(bufs.d_canvas_in); bufs.d_canvas_in = nullptr; }
     if (bufs.d_canvas_out) { cudaFree(bufs.d_canvas_out); bufs.d_canvas_out = nullptr; }
     if (bufs.d_confidences) { cudaFree(bufs.d_confidences); bufs.d_confidences = nullptr; }
+    if (bufs.d_entropies) { cudaFree(bufs.d_entropies); bufs.d_entropies = nullptr; }
     if (bufs.d_frozen_mask) { cudaFree(bufs.d_frozen_mask); bufs.d_frozen_mask = nullptr; }
     if (bufs.d_active_indices) { cudaFree(bufs.d_active_indices); bufs.d_active_indices = nullptr; }
     if (bufs.d_converged) { cudaFree(bufs.d_converged); bufs.d_converged = nullptr; }
     if (bufs.d_active_count) { cudaFree(bufs.d_active_count); bufs.d_active_count = nullptr; }
+    if (bufs.d_logits) { cudaFree(bufs.d_logits); bufs.d_logits = nullptr; }
+    if (bufs.d_logits_ema) { cudaFree(bufs.d_logits_ema); bufs.d_logits_ema = nullptr; }
+    if (bufs.d_branch_logprobs) { cudaFree(bufs.d_branch_logprobs); bufs.d_branch_logprobs = nullptr; }
+    if (bufs.d_winning_branch) { cudaFree(bufs.d_winning_branch); bufs.d_winning_branch = nullptr; }
     bufs.capacity = 0;
+    bufs.n_vocab = 0;
 }
 
 void diff_device_set_canvas(
@@ -198,7 +285,8 @@ void diff_device_get_canvas(
     float* h_conf,
     uint8_t* h_frozen_mask,
     size_t B,
-    void* stream
+    void* stream,
+    float* h_entropy
 ) {
     cudaStream_t s = static_cast<cudaStream_t>(stream);
     if (h_canvas) {
@@ -206,6 +294,9 @@ void diff_device_get_canvas(
     }
     if (h_conf) {
         cudaMemcpyAsync(h_conf, bufs.d_confidences, B * sizeof(float), cudaMemcpyDeviceToHost, s);
+    }
+    if (h_entropy && bufs.d_entropies) {
+        cudaMemcpyAsync(h_entropy, bufs.d_entropies, B * sizeof(float), cudaMemcpyDeviceToHost, s);
     }
     if (h_frozen_mask) {
         cudaMemcpyAsync(h_frozen_mask, bufs.d_frozen_mask, B * sizeof(uint8_t), cudaMemcpyDeviceToHost, s);
@@ -242,14 +333,15 @@ void diff_device_sample_and_anchor(
     size_t n_vocab,
     float freeze_threshold,
     DeviceDiffusionBuffers& bufs,
-    void* stream
+    void* stream,
+    float momentum_beta
 ) {
     if (W_active == 0) return;
     cudaStream_t s = static_cast<cudaStream_t>(stream);
 
     // 1. Copy frozen tokens to canvas_out
-    int threads = 32;
-    int blocks = (static_cast<int>(bufs.capacity) + threads - 1) / threads;
+    int threads = 256;
+    int blocks = static_cast<int>((bufs.capacity + threads - 1) / threads);
     diff_copy_frozen_kernel<<<blocks, threads, 0, s>>>(
         bufs.d_canvas_in,
         bufs.d_canvas_out,
@@ -257,16 +349,42 @@ void diff_device_sample_and_anchor(
         bufs.capacity
     );
 
-    // 2. Reduce active query set positions
-    diff_sample_and_anchor_kernel<<<static_cast<int>(W_active), 512, 0, s>>>(
-        d_logits,
-        d_active_indices,
+    // 2. If logits are in host memory and d_logits buffer is present, copy asynchronously
+    const float* actual_d_logits = d_logits;
+    cudaPointerAttributes ptr_attr;
+    cudaError_t p_err = cudaPointerGetAttributes(&ptr_attr, d_logits);
+    bool is_device_ptr = (p_err == cudaSuccess && (ptr_attr.type == cudaMemoryTypeDevice || ptr_attr.type == cudaMemoryTypeManaged));
+
+    if (!is_device_ptr && bufs.d_logits) {
+        cudaMemcpyAsync(bufs.d_logits, d_logits, W_active * n_vocab * sizeof(float), cudaMemcpyHostToDevice, s);
+        actual_d_logits = bufs.d_logits;
+    }
+
+    // 3. Launch PTX warp-shuffle categorical reduction kernel (1024 threads per row block)
+    dim3 grid(static_cast<unsigned int>(W_active), 1, 1);
+    dim3 block(1024, 1, 1);
+    diff_sample_and_anchor_kernel<<<grid, block, 0, s>>>(
+        actual_d_logits,
+        d_active_indices ? d_active_indices : bufs.d_active_indices,
         bufs.d_canvas_out,
         bufs.d_confidences,
+        bufs.d_entropies,
         bufs.d_frozen_mask,
+        bufs.d_logits_ema,
+        momentum_beta,
         W_active,
         n_vocab,
         freeze_threshold
+    );
+
+    // 4. Check convergence across canvas
+    diff_check_convergence_kernel<<<1, 32, 0, s>>>(
+        bufs.d_canvas_in,
+        bufs.d_canvas_out,
+        bufs.d_frozen_mask,
+        bufs.d_converged,
+        bufs.d_active_count,
+        bufs.capacity
     );
 }
 
