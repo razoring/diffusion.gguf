@@ -718,6 +718,17 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         } else if (arg == "--temp") cfg.default_params.sampling.temp = next_float("--temp");
         else if (arg == "--top-p") cfg.default_params.sampling.top_p = next_float("--top-p");
         else if (arg == "--top-k") cfg.default_params.sampling.top_k = next_int("--top-k");
+        else if (arg == "--active-set") {
+            std::string as = next_str("--active-set");
+            if (as == "disabled" || as == "off") cfg.default_params.active_set_mode = ActiveSetMode::DISABLED;
+            else cfg.default_params.active_set_mode = ActiveSetMode::NATURAL_COLLAPSE;
+        }
+        else if (arg == "--tail-pruning") {
+            std::string tp = next_str("--tail-pruning");
+            if (tp == "strict" || tp == "aggressive") cfg.default_params.tail_pruning = TailPruningMode::AGGRESSIVE;
+            else if (tp == "adaptive") cfg.default_params.tail_pruning = TailPruningMode::ADAPTIVE;
+            else cfg.default_params.tail_pruning = TailPruningMode::OFF;
+        }
     }
 
     if (cfg.default_params.n_predict <= 128) {
@@ -901,9 +912,53 @@ static GenParams parse_request_params(const json& body, const GenParams& default
             else if (init == "pad") params.init_strategy = InitStrategy::PAD;
             else params.init_strategy = InitStrategy::NGRAM;
         }
+        if (diff.contains("active_set")) {
+            std::string as = diff["active_set"].get<std::string>();
+            if (as == "disabled" || as == "off") params.active_set_mode = ActiveSetMode::DISABLED;
+            else params.active_set_mode = ActiveSetMode::NATURAL_COLLAPSE;
+        }
+        if (diff.contains("tail_pruning")) {
+            std::string tp = diff["tail_pruning"].get<std::string>();
+            if (tp == "strict" || tp == "aggressive") params.tail_pruning = TailPruningMode::AGGRESSIVE;
+            else if (tp == "adaptive") params.tail_pruning = TailPruningMode::ADAPTIVE;
+            else params.tail_pruning = TailPruningMode::OFF;
+        }
     }
 
     return params;
+}
+
+static json telemetry_to_json(const FrontierTelemetry& tel, int32_t block_size) {
+    json hist = json::object();
+    for (const auto& kv : tel.width_pass_count) {
+        hist[std::to_string(kv.first)] = kv.second;
+    }
+    json time_hist = json::object();
+    for (const auto& kv : tel.time_weighted_width_histogram()) {
+        time_hist[std::to_string(kv.first)] = kv.second;
+    }
+    json tp_hist = json::object();
+    for (const auto& kv : tel.empirical_throughput_by_width()) {
+        tp_hist[std::to_string(kv.first)] = kv.second;
+    }
+    return json{
+        {"avg_frontier_width", tel.avg_frontier_width()},
+        {"effective_parallelism_ratio", tel.effective_parallelism_ratio(block_size)},
+        {"total_forward_passes", tel.total_forward_passes},
+        {"degenerate_w1_passes", tel.degenerate_w1_passes},
+        {"w_critical_detected", tel.compute_w_critical(0.90)},
+        {"width_pass_count", hist},
+        {"time_weighted_width_histogram", time_hist},
+        {"empirical_throughput_by_width", tp_hist},
+        {"mobility", {
+            {"expansions", tel.expansions},
+            {"contractions", tel.contractions},
+            {"shifts", tel.shifts},
+            {"stationary_passes", tel.stationary_passes},
+            {"avg_lifetime_passes", tel.avg_lifetime_passes}
+        }},
+        {"position_flips", tel.position_flips}
+    };
 }
 
 } // namespace diffusion
@@ -1276,7 +1331,8 @@ int main(int argc, char** argv) {
                     {"total_tokens", prompt_tokens.size() + result.tokens.size()},
                     {"diffusion_iterations", result.iterations},
                     {"tokens_per_iteration", result.tok_per_iter}
-                }}
+                }},
+                {"diffusion_telemetry", telemetry_to_json(result.telemetry, params.block_size)}
             };
             res.set_content(resp.dump(), "application/json");
         } else {
@@ -1563,7 +1619,8 @@ int main(int argc, char** argv) {
                     {"total_tokens", prompt_tokens.size() + result.tokens.size()},
                     {"diffusion_iterations", result.iterations},
                     {"tokens_per_iteration", result.tok_per_iter}
-                }}
+                }},
+                {"diffusion_telemetry", telemetry_to_json(result.telemetry, params.block_size)}
             };
             res.set_content(resp.dump(), "application/json");
         } else {
