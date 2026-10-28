@@ -188,7 +188,7 @@ struct GenParams {
     // Active-Set & Diffusion options
     ActiveSetMode active_set_mode = ActiveSetMode::NATURAL_COLLAPSE;
     TailPruningMode tail_pruning = TailPruningMode::OFF;
-    CommitmentPolicy commitment_policy = CommitmentPolicy::SOFT_FREEZE;
+    CommitmentPolicy commitment_policy = CommitmentPolicy::UNCOMMITTED_FRONTIER;
 
     // Prompt cache options
     std::string prompt_cache_path;

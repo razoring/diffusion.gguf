@@ -636,6 +636,9 @@ static void print_server_help() {
               << "  --temp FLOAT             Temperature (default: 0.8)\n"
               << "  --top-p FLOAT            Top-p (default: 0.95)\n"
               << "  --top-k N                Top-k (default: 40)\n"
+              << "  --active-set MODE        Active-set mode: natural_collapse (default), disabled\n"
+              << "  --tail-pruning MODE      Tail-pruning mode: off (default), adaptive, aggressive\n"
+              << "  --commitment-policy POL  Commitment policy: uncommitted (default), soft, prefix\n"
               << "  -v, --version            Show version\n"
               << "  -h, --help               Show help message\n";
 }
@@ -732,8 +735,8 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         else if (arg == "--commitment-policy") {
             std::string cp = next_str("--commitment-policy");
             if (cp == "prefix" || cp == "full") cfg.default_params.commitment_policy = CommitmentPolicy::FULL_PREFIX_FREEZE;
-            else if (cp == "uncommitted" || cp == "roving") cfg.default_params.commitment_policy = CommitmentPolicy::UNCOMMITTED_FRONTIER;
-            else cfg.default_params.commitment_policy = CommitmentPolicy::SOFT_FREEZE;
+            else if (cp == "soft") cfg.default_params.commitment_policy = CommitmentPolicy::SOFT_FREEZE;
+            else cfg.default_params.commitment_policy = CommitmentPolicy::UNCOMMITTED_FRONTIER;
         }
     }
 
@@ -932,8 +935,8 @@ static GenParams parse_request_params(const json& body, const GenParams& default
         if (diff.contains("commitment_policy")) {
             std::string cp = diff["commitment_policy"].get<std::string>();
             if (cp == "prefix" || cp == "full") params.commitment_policy = CommitmentPolicy::FULL_PREFIX_FREEZE;
-            else if (cp == "uncommitted" || cp == "roving") params.commitment_policy = CommitmentPolicy::UNCOMMITTED_FRONTIER;
-            else params.commitment_policy = CommitmentPolicy::SOFT_FREEZE;
+            else if (cp == "soft") params.commitment_policy = CommitmentPolicy::SOFT_FREEZE;
+            else params.commitment_policy = CommitmentPolicy::UNCOMMITTED_FRONTIER;
         }
     }
 
@@ -1442,7 +1445,15 @@ int main(int argc, char** argv) {
                                 {"logprobs", nullptr},
                                 {"finish_reason", finish_reason}
                             }
-                        })}
+                        })},
+                        {"usage", {
+                            {"prompt_tokens", prompt_tokens.size()},
+                            {"completion_tokens", result.tokens.size()},
+                            {"total_tokens", prompt_tokens.size() + result.tokens.size()},
+                            {"diffusion_iterations", result.iterations},
+                            {"tokens_per_iteration", result.tok_per_iter}
+                        }},
+                        {"diffusion_telemetry", telemetry_to_json(result.telemetry, params.block_size)}
                     };
                     std::string sse = "data: " + final_chunk.dump() + "\n\ndata: [DONE]\n\n";
                     sink.write(sse.data(), sse.size());
@@ -1778,7 +1789,15 @@ int main(int argc, char** argv) {
                                     {"delta", json::object()},
                                     {"finish_reason", finish_reason}
                                 }
-                            })}
+                            })},
+                            {"usage", {
+                                {"prompt_tokens", prompt_tokens.size()},
+                                {"completion_tokens", result.tokens.size()},
+                                {"total_tokens", prompt_tokens.size() + result.tokens.size()},
+                                {"diffusion_iterations", result.iterations},
+                                {"tokens_per_iteration", result.tok_per_iter}
+                            }},
+                            {"diffusion_telemetry", telemetry_to_json(result.telemetry, params.block_size)}
                         };
                         std::string sse = "data: " + final_chunk.dump() + "\n\ndata: [DONE]\n\n";
                         sink.write(sse.data(), sse.size());
