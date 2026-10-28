@@ -11,8 +11,9 @@ namespace kernels {
 
 // Kernel 1: Categorical reduction over active query positions with PTX warp-shuffle & entropy
 __global__ void diff_sample_and_anchor_kernel(
-    const float* __restrict__ logits,          // [W_active, n_vocab]
+    const float* __restrict__ logits,          // [B, n_vocab]
     const int32_t* __restrict__ active_indices,// [W_active] -> maps to canvas index b
+    const int32_t* __restrict__ canvas_in,     // [B]
     int32_t* __restrict__ canvas_out,          // [B]
     float* __restrict__ confidences,           // [B]
     float* __restrict__ entropies,             // [B]
@@ -20,15 +21,19 @@ __global__ void diff_sample_and_anchor_kernel(
     float* __restrict__ logits_ema,            // [B, n_vocab] optional EMA buffer
     float momentum_beta,
     size_t W_active,
+    size_t B,
     size_t n_vocab,
-    float freeze_threshold
+    float freeze_threshold,
+    bool is_final_pass
 ) {
     size_t r = blockIdx.x;
     if (r >= W_active) return;
 
-    int32_t b = active_indices ? active_indices[r] : static_cast<int32_t>(r);
-    const float* row = logits + (r * n_vocab);
-    float* row_ema = logits_ema ? (logits_ema + (b * n_vocab)) : nullptr;
+    int32_t b = active_indices ? active_indices[r] : static_cast<int32_t>(r + 1);
+    if (b <= 0 || b >= static_cast<int32_t>(B)) return;
+
+    const float* row = logits + (static_cast<size_t>(b - 1) * n_vocab);
+    float* row_ema = logits_ema ? (logits_ema + (static_cast<size_t>(b) * n_vocab)) : nullptr;
     int tid = threadIdx.x;
 
     // Phase 1: Local register scan for max logit and argmax index
@@ -149,10 +154,6 @@ __global__ void diff_sample_and_anchor_kernel(
         canvas_out[b] = best_token;
         confidences[b] = confidence;
         if (entropies) entropies[b] = entropy;
-
-        if (confidence >= freeze_threshold) {
-            frozen_mask[b] = 1; // Newly frozen anchor
-        }
     }
 }
 
@@ -169,42 +170,88 @@ __global__ void diff_copy_frozen_kernel(
     }
 }
 
-// Kernel 3: Warp-ballot convergence check and active token count
+// Kernel 3: Dynamic frontier advance, convergence check, and active token count
 __global__ void diff_check_convergence_kernel(
     const int32_t* __restrict__ canvas_in,
     const int32_t* __restrict__ canvas_out,
-    const uint8_t* __restrict__ frozen_mask,
+    const float* __restrict__ confidences,
+    uint8_t* __restrict__ frozen_mask,
     int32_t* __restrict__ converged_flag,
     int32_t* __restrict__ active_count,
-    size_t B
+    size_t B,
+    float freeze_threshold,
+    int pass_m,
+    bool is_final_pass
 ) {
     int tid = threadIdx.x;
-    int is_match = 1;
-    int is_active = 0;
-
-    if (tid < static_cast<int>(B)) {
-        is_match = (canvas_in[tid] == canvas_out[tid]) ? 1 : 0;
-        is_active = (frozen_mask[tid] == 0) ? 1 : 0;
-    }
-
-    // Warp ballot for match
-    unsigned int mask = __activemask();
-    int all_match = __all_sync(mask, (tid < static_cast<int>(B)) ? is_match : 1);
-
-    // Warp reduction for active count
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        is_active += __shfl_down_sync(mask, is_active, offset);
-    }
 
     if (tid == 0) {
+        // Frontier starts at 0 (prefix token is always frozen)
+        frozen_mask[0] = 1;
+        int frontier = 1;
+        while (frontier < static_cast<int>(B) && frozen_mask[frontier] == 1) {
+            frontier++;
+        }
+
+        // Advance frontier contiguously along stabilized or high-confidence tokens
+        while (frontier < static_cast<int>(B)) {
+            // In pass 1, frontier cannot advance past token 1
+            if (pass_m == 1 && frontier > 1) {
+                break;
+            }
+
+            int b = frontier;
+            bool stable = (pass_m > 1) && (canvas_in[b] == canvas_out[b]);
+            bool confident = (confidences[b] >= freeze_threshold);
+
+            if (stable) {
+                frozen_mask[b] = 1;
+                frontier++;
+            } else if (confident) {
+                // Token b verified from frozen prefix, but successor b+1 was evaluated on stale canvas_in[b].
+                // Freeze b and stop frontier to prevent hallucination propagation.
+                frozen_mask[b] = 1;
+                frontier++;
+                break;
+            } else {
+                break; // Frontier stops at first unverified token
+            }
+        }
+
+        // Count active (unfrozen) tokens and check overall stationarity
+        int active_cnt = 0;
+        int all_match = 1;
+        for (size_t i = 0; i < B; ++i) {
+            if (frozen_mask[i] == 0) active_cnt++;
+            if (canvas_in[i] != canvas_out[i]) all_match = 0;
+        }
+
         *converged_flag = all_match;
-        *active_count = is_active;
+        *active_count = active_cnt;
     }
 }
 
+struct ScopedCudaDevice {
+    int prev_dev = -1;
+    explicit ScopedCudaDevice(int target_dev) {
+        if (target_dev >= 0) {
+            cudaGetDevice(&prev_dev);
+            if (prev_dev != target_dev) {
+                cudaSetDevice(target_dev);
+            }
+        }
+    }
+    ~ScopedCudaDevice() {
+        if (prev_dev >= 0) {
+            cudaSetDevice(prev_dev);
+        }
+    }
+};
+
 bool diff_device_alloc(DeviceDiffusionBuffers& bufs, size_t max_block_size, size_t n_vocab) {
+    cudaGetDevice(&bufs.device_id);
     diff_device_free(bufs);
+    ScopedCudaDevice scope(bufs.device_id);
     bufs.capacity = max_block_size;
     bufs.n_vocab = n_vocab;
 
@@ -249,6 +296,7 @@ bool diff_device_alloc(DeviceDiffusionBuffers& bufs, size_t max_block_size, size
 }
 
 void diff_device_free(DeviceDiffusionBuffers& bufs) {
+    ScopedCudaDevice scope(bufs.device_id);
     if (bufs.d_canvas_in) { cudaFree(bufs.d_canvas_in); bufs.d_canvas_in = nullptr; }
     if (bufs.d_canvas_out) { cudaFree(bufs.d_canvas_out); bufs.d_canvas_out = nullptr; }
     if (bufs.d_confidences) { cudaFree(bufs.d_confidences); bufs.d_confidences = nullptr; }
@@ -268,14 +316,23 @@ void diff_device_free(DeviceDiffusionBuffers& bufs) {
 void diff_device_set_canvas(
     DeviceDiffusionBuffers& bufs,
     const int32_t* h_canvas,
+    const uint8_t* h_frozen_mask,
     size_t B,
     void* stream
 ) {
+    ScopedCudaDevice scope(bufs.device_id);
     cudaStream_t s = static_cast<cudaStream_t>(stream);
     cudaMemcpyAsync(bufs.d_canvas_in, h_canvas, B * sizeof(int32_t), cudaMemcpyHostToDevice, s);
-    cudaMemsetAsync(bufs.d_frozen_mask, 0, B * sizeof(uint8_t), s);
+    cudaMemcpyAsync(bufs.d_canvas_out, h_canvas, B * sizeof(int32_t), cudaMemcpyHostToDevice, s);
+    if (h_frozen_mask) {
+        cudaMemcpyAsync(bufs.d_frozen_mask, h_frozen_mask, B * sizeof(uint8_t), cudaMemcpyHostToDevice, s);
+    } else {
+        cudaMemsetAsync(bufs.d_frozen_mask, 0, B * sizeof(uint8_t), s);
+        uint8_t one = 1;
+        cudaMemcpyAsync(bufs.d_frozen_mask, &one, sizeof(uint8_t), cudaMemcpyHostToDevice, s);
+    }
     cudaMemsetAsync(bufs.d_converged, 0, sizeof(int32_t), s);
-    int32_t b_init = static_cast<int32_t>(B);
+    int32_t b_init = static_cast<int32_t>(B > 1 ? B - 1 : 0);
     cudaMemcpyAsync(bufs.d_active_count, &b_init, sizeof(int32_t), cudaMemcpyHostToDevice, s);
 }
 
@@ -288,6 +345,7 @@ void diff_device_get_canvas(
     void* stream,
     float* h_entropy
 ) {
+    ScopedCudaDevice scope(bufs.device_id);
     cudaStream_t s = static_cast<cudaStream_t>(stream);
     if (h_canvas) {
         cudaMemcpyAsync(h_canvas, bufs.d_canvas_out, B * sizeof(int32_t), cudaMemcpyDeviceToHost, s);
@@ -309,6 +367,7 @@ void diff_device_get_canvas(
 }
 
 bool diff_device_is_converged(const DeviceDiffusionBuffers& bufs, void* stream) {
+    ScopedCudaDevice scope(bufs.device_id);
     cudaStream_t s = static_cast<cudaStream_t>(stream);
     int32_t h_conv = 0;
     cudaMemcpyAsync(&h_conv, bufs.d_converged, sizeof(int32_t), cudaMemcpyDeviceToHost, s);
@@ -318,6 +377,7 @@ bool diff_device_is_converged(const DeviceDiffusionBuffers& bufs, void* stream) 
 }
 
 int32_t diff_device_get_active_count(const DeviceDiffusionBuffers& bufs, void* stream) {
+    ScopedCudaDevice scope(bufs.device_id);
     cudaStream_t s = static_cast<cudaStream_t>(stream);
     int32_t h_count = 0;
     cudaMemcpyAsync(&h_count, bufs.d_active_count, sizeof(int32_t), cudaMemcpyDeviceToHost, s);
@@ -330,33 +390,38 @@ void diff_device_sample_and_anchor(
     const float* d_logits,
     const int32_t* d_active_indices,
     size_t W_active,
+    size_t B,
     size_t n_vocab,
     float freeze_threshold,
     DeviceDiffusionBuffers& bufs,
     void* stream,
-    float momentum_beta
+    float momentum_beta,
+    int pass_m,
+    bool is_final_pass
 ) {
-    if (W_active == 0) return;
+    if (W_active == 0 || B <= 1) return;
+    ScopedCudaDevice scope(bufs.device_id);
     cudaStream_t s = static_cast<cudaStream_t>(stream);
 
     // 1. Copy frozen tokens to canvas_out
     int threads = 256;
-    int blocks = static_cast<int>((bufs.capacity + threads - 1) / threads);
+    int blocks = static_cast<int>((B + threads - 1) / threads);
     diff_copy_frozen_kernel<<<blocks, threads, 0, s>>>(
         bufs.d_canvas_in,
         bufs.d_canvas_out,
         bufs.d_frozen_mask,
-        bufs.capacity
+        B
     );
 
     // 2. If logits are in host memory and d_logits buffer is present, copy asynchronously
     const float* actual_d_logits = d_logits;
     cudaPointerAttributes ptr_attr;
     cudaError_t p_err = cudaPointerGetAttributes(&ptr_attr, d_logits);
+    if (p_err != cudaSuccess) cudaGetLastError();
     bool is_device_ptr = (p_err == cudaSuccess && (ptr_attr.type == cudaMemoryTypeDevice || ptr_attr.type == cudaMemoryTypeManaged));
 
     if (!is_device_ptr && bufs.d_logits) {
-        cudaMemcpyAsync(bufs.d_logits, d_logits, W_active * n_vocab * sizeof(float), cudaMemcpyHostToDevice, s);
+        cudaMemcpyAsync(bufs.d_logits, d_logits, B * n_vocab * sizeof(float), cudaMemcpyHostToDevice, s);
         actual_d_logits = bufs.d_logits;
     }
 
@@ -365,7 +430,8 @@ void diff_device_sample_and_anchor(
     dim3 block(1024, 1, 1);
     diff_sample_and_anchor_kernel<<<grid, block, 0, s>>>(
         actual_d_logits,
-        d_active_indices ? d_active_indices : bufs.d_active_indices,
+        d_active_indices,
+        bufs.d_canvas_in,
         bufs.d_canvas_out,
         bufs.d_confidences,
         bufs.d_entropies,
@@ -373,39 +439,66 @@ void diff_device_sample_and_anchor(
         bufs.d_logits_ema,
         momentum_beta,
         W_active,
+        B,
         n_vocab,
-        freeze_threshold
+        freeze_threshold,
+        is_final_pass
     );
 
-    // 4. Check convergence across canvas
+    // 4. Advance dynamic frontier and check convergence across canvas
     diff_check_convergence_kernel<<<1, 32, 0, s>>>(
         bufs.d_canvas_in,
         bufs.d_canvas_out,
+        bufs.d_confidences,
         bufs.d_frozen_mask,
         bufs.d_converged,
         bufs.d_active_count,
-        bufs.capacity
+        B,
+        freeze_threshold,
+        pass_m,
+        is_final_pass
     );
+
+    if (s) {
+        cudaStreamSynchronize(s);
+    } else {
+        cudaDeviceSynchronize();
+    }
 }
 
 void diff_device_check_convergence(
     DeviceDiffusionBuffers& bufs,
     size_t B,
+    float freeze_threshold,
+    int pass_m,
+    bool is_final_pass,
     void* stream
 ) {
+    ScopedCudaDevice scope(bufs.device_id);
     cudaStream_t s = static_cast<cudaStream_t>(stream);
     diff_check_convergence_kernel<<<1, 32, 0, s>>>(
         bufs.d_canvas_in,
         bufs.d_canvas_out,
+        bufs.d_confidences,
         bufs.d_frozen_mask,
         bufs.d_converged,
         bufs.d_active_count,
-        B
+        B,
+        freeze_threshold,
+        pass_m,
+        is_final_pass
     );
 }
 
 void diff_device_swap_canvas(DeviceDiffusionBuffers& bufs) {
+    ScopedCudaDevice scope(bufs.device_id);
     std::swap(bufs.d_canvas_in, bufs.d_canvas_out);
+}
+
+int diff_device_get_current_device() {
+    int dev = 0;
+    cudaGetDevice(&dev);
+    return dev;
 }
 
 } // namespace kernels

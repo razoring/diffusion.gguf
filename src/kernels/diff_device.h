@@ -19,6 +19,7 @@ struct DeviceDiffusionBuffers {
     float* d_logits_ema = nullptr;      // [max_block_size * n_vocab] momentum-smoothed logits
     float* d_branch_logprobs = nullptr; // [multi_candidate_k] cumulative branch logprobs
     int32_t* d_winning_branch = nullptr;// [1] winning branch index
+    int device_id = 0;
     size_t capacity = 0;
     size_t n_vocab = 0;
 };
@@ -27,10 +28,11 @@ struct DeviceDiffusionBuffers {
 bool diff_device_alloc(DeviceDiffusionBuffers& bufs, size_t max_block_size, size_t n_vocab = 262144);
 void diff_device_free(DeviceDiffusionBuffers& bufs);
 
-// Upload initial canvas to device
+// Upload initial canvas and frozen mask to device
 void diff_device_set_canvas(
     DeviceDiffusionBuffers& bufs,
     const int32_t* h_canvas,
+    const uint8_t* h_frozen_mask,
     size_t B,
     void* stream = nullptr
 );
@@ -58,22 +60,31 @@ void diff_device_sample_and_anchor(
     const float* d_logits,
     const int32_t* d_active_indices,
     size_t W_active,
+    size_t B,
     size_t n_vocab,
     float freeze_threshold,
     DeviceDiffusionBuffers& bufs,
     void* stream = nullptr,
-    float momentum_beta = 0.0f
+    float momentum_beta = 0.0f,
+    int pass_m = 1,
+    bool is_final_pass = false
 );
 
 // Launch device warp ballot convergence check comparing d_canvas_in vs d_canvas_out
 void diff_device_check_convergence(
     DeviceDiffusionBuffers& bufs,
     size_t B,
+    float freeze_threshold = 0.85f,
+    int pass_m = 1,
+    bool is_final_pass = false,
     void* stream = nullptr
 );
 
 // Swap d_canvas_in and d_canvas_out pointers
 void diff_device_swap_canvas(DeviceDiffusionBuffers& bufs);
+
+// Get active CUDA device id (or 0 on CPU)
+int diff_device_get_current_device();
 
 } // namespace kernels
 } // namespace diffusion

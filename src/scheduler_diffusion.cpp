@@ -68,6 +68,8 @@ GenResult SchedulerDiffusion::run(
     int M_max = (params.max_iters > 0 && params.max_iters <= 16) ? params.max_iters : default_max_diffusion_steps_;
     int max_iters = (params.max_iters > 0 && params.max_iters > 16) ? params.max_iters : (n_predict + 16);
 
+    std::cerr << "[DIFF DEBUG] run() start: prompt_len=" << prompt_len << " n_predict=" << n_predict << " B_target=" << B_target << "\n";
+
     // Ensure device buffer capacity accommodates block size
     if (!device_bufs_allocated_ || device_bufs_.capacity < static_cast<size_t>(B_target)) {
         if (device_bufs_allocated_) {
@@ -99,6 +101,19 @@ GenResult SchedulerDiffusion::run(
         } else {
             backend_.kv_truncate(prompt_len - 1, params.seq_id);
             prefill_logits = backend_.eval(effective_prompt.data() + prompt_len - 1, 1, prompt_len - 1, false, params.seq_id);
+        }
+    }
+    std::cerr << "[DIFF DEBUG] prefill done\n";
+
+    // Ensure device buffer capacity accommodates block size and matches the active output GPU device
+    int cur_device = kernels::diff_device_get_current_device();
+    if (!device_bufs_allocated_ || device_bufs_.capacity < static_cast<size_t>(B_target) || device_bufs_.device_id != cur_device) {
+        if (device_bufs_allocated_) {
+            kernels::diff_device_free(device_bufs_);
+            device_bufs_allocated_ = false;
+        }
+        if (kernels::diff_device_alloc(device_bufs_, static_cast<size_t>(B_target * 2), backend_.n_vocab())) {
+            device_bufs_allocated_ = true;
         }
     }
 
@@ -209,6 +224,7 @@ GenResult SchedulerDiffusion::run(
         }
     } else {
         // Discrete Block Diffusion Inference Loop
+        std::vector<int32_t> leftover_canvas;
         while (static_cast<int>(result.tokens.size()) < n_predict && result.iterations < max_iters) {
             int B_cur = std::min(B_target, n_predict - static_cast<int>(result.tokens.size()));
             if (B_cur <= 0) break;
@@ -266,18 +282,28 @@ GenResult SchedulerDiffusion::run(
             confidences[0] = conf0;
             frozen_mask[0] = 1; // Position 0 is already conditioned on prompt prefix
 
-            if (params.init_strategy == InitStrategy::NGRAM && guesser_) {
+            int filled = 1;
+            // 1. Rollover uncommitted lookahead predictions from previous block
+            for (size_t i = 1; i < leftover_canvas.size() && filled < B_cur; ++i) {
+                canvas[filled++] = leftover_canvas[i];
+            }
+
+            // 2. If slots remain, query guesser from running history
+            if (filled < B_cur && guesser_) {
                 running_history.push_back(x0);
-                auto guesses = guesser_->make_guesses(B_cur - 1, running_history);
+                auto guesses = guesser_->make_guesses(B_cur - filled, running_history);
                 running_history.pop_back();
-                for (size_t g = 0; g < guesses.size() && g + 1 < static_cast<size_t>(B_cur); ++g) {
-                    canvas[g + 1] = guesses[g];
+                for (int32_t g : guesses) {
+                    if (filled >= B_cur) break;
+                    canvas[filled++] = g;
                 }
-            } else {
-                // Adaptive entropy / model prior: roll greedy continuation
-                for (int i = 1; i < B_cur; ++i) {
-                    canvas[i] = canvas[i - 1];
-                }
+            }
+
+            // 3. Fallback for open slots: pad token
+            int32_t fallback_pad = tokenizer_.pad_or_fallback();
+            if (fallback_pad < 0) fallback_pad = x0;
+            while (filled < B_cur) {
+                canvas[filled++] = fallback_pad;
             }
 
             LogitsView L;
@@ -307,11 +333,11 @@ GenResult SchedulerDiffusion::run(
                 std::vector<int32_t> custom_pos(B_cur);
                 if (params.annealed_attention) {
                     if (m == 1) {
-                        // Pass 1: Full diffusion attention (all canvas tokens attend bidirectionally)
-                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + B_cur - 1;
+                        // Pass 1: Full diffusion attention (all canvas tokens share position P)
+                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P;
                     } else if (m == 2) {
-                        // Pass 2: Partially annealed attention (localized lookahead)
-                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + std::min(B_cur - 1, i + 2);
+                        // Pass 2: Partially annealed attention (pairwise lookahead)
+                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + (i / 2);
                     } else {
                         // Pass 3+: Strict causal attention before commitment
                         for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + i;
@@ -335,16 +361,21 @@ GenResult SchedulerDiffusion::run(
 
                 // GPU PTX Denoising Kernel if device buffers allocated
                 if (device_bufs_allocated_ && L.data) {
-                    kernels::diff_device_set_canvas(device_bufs_, canvas.data(), B_cur);
+                    int W_active = B_cur - 1;
+                    bool is_final_pass = (m == M_max_cur);
+                    kernels::diff_device_set_canvas(device_bufs_, canvas.data(), frozen_mask.data(), B_cur);
                     kernels::diff_device_sample_and_anchor(
                         L.data,
                         nullptr,
+                        W_active,
                         B_cur,
                         n_vocab,
                         theta_freeze,
                         device_bufs_,
                         nullptr,
-                        params.momentum_beta
+                        params.momentum_beta,
+                        m,
+                        is_final_pass
                     );
                     kernels::diff_device_get_canvas(
                         device_bufs_,
@@ -356,13 +387,12 @@ GenResult SchedulerDiffusion::run(
                     frozen_mask[0] = 1; // Preserve prefix token 0
 
                     int remaining_active = kernels::diff_device_get_active_count(device_bufs_);
-                    if (remaining_active == 0 || kernels::diff_device_is_converged(device_bufs_)) {
+                    if (m > 1 && (remaining_active == 0 || kernels::diff_device_is_converged(device_bufs_))) {
                         converged = true;
                         break;
                     }
                 } else {
                     // CPU fallback denoising path
-                    bool all_frozen = true;
                     for (int i = 1; i < B_cur; ++i) {
                         const float* row = L.row(i - 1);
                         if (!row) row = backend_.get_logits_ith(i - 1);
@@ -383,19 +413,28 @@ GenResult SchedulerDiffusion::run(
                         }
                         float conf = sum_exp > 0.0 ? static_cast<float>(1.0 / sum_exp) : 1.0f;
                         confidences[i] = conf;
-
-                        bool stable = (canvas[i] == best_tok);
                         canvas[i] = best_tok;
+                    }
 
-                        if (stable || conf >= theta_freeze || m == M_max_cur) {
-                            frozen_mask[i] = 1;
+                    // Advance dynamic frontier
+                    frozen_mask[0] = 1;
+                    int frontier = 1;
+                    while (frontier < B_cur && frozen_mask[frontier] == 1) frontier++;
+                    while (frontier < B_cur) {
+                        if (m == 1 && frontier > 1) break;
+                        int b = frontier;
+                        bool confident = (confidences[b] >= theta_freeze);
+                        if (confident) {
+                            frozen_mask[b] = 1;
+                            frontier++;
+                            break;
                         } else {
-                            frozen_mask[i] = 0;
-                            all_frozen = false;
+                            break;
                         }
                     }
 
-                    if (all_frozen) {
+                    bool all_frozen = (frontier >= B_cur);
+                    if (m > 1 && all_frozen) {
                         converged = true;
                         break;
                     }
@@ -410,7 +449,8 @@ GenResult SchedulerDiffusion::run(
 
             // Ensure committed tokens are encoded under strict causal attention before permanent KV commitment
             bool last_pass_was_causal = (last_pass_m >= 3) || !params.annealed_attention;
-            if (!last_pass_was_causal) {
+            bool kv_matches_committed = last_pass_was_causal && kernels::diff_device_is_converged(device_bufs_);
+            if (!kv_matches_committed) {
                 backend_.kv_truncate(P, params.seq_id);
                 std::vector<int32_t> causal_pos(k_commit);
                 for (int i = 0; i < k_commit; ++i) causal_pos[i] = P + i;
@@ -481,6 +521,12 @@ GenResult SchedulerDiffusion::run(
                     backend_.kv_truncate(P + committed_count, params.seq_id);
                 }
                 break;
+            }
+
+            // Save leftover uncommitted lookahead tokens for seamless rollover into next block
+            leftover_canvas.clear();
+            for (int i = k_commit; i < B_cur; ++i) {
+                leftover_canvas.push_back(canvas[i]);
             }
 
             // Advance position P by committed tokens and update prefix logits for next block from row k_commit - 1

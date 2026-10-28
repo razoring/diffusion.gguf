@@ -41,11 +41,17 @@ void diff_device_free(DeviceDiffusionBuffers& bufs) {
     bufs.n_vocab = 0;
 }
 
-void diff_device_set_canvas(DeviceDiffusionBuffers& bufs, const int32_t* h_canvas, size_t B, void*) {
+void diff_device_set_canvas(DeviceDiffusionBuffers& bufs, const int32_t* h_canvas, const uint8_t* h_frozen_mask, size_t B, void*) {
     memcpy(bufs.d_canvas_in, h_canvas, B * sizeof(int32_t));
-    memset(bufs.d_frozen_mask, 0, B * sizeof(uint8_t));
+    memcpy(bufs.d_canvas_out, h_canvas, B * sizeof(int32_t));
+    if (h_frozen_mask) {
+        memcpy(bufs.d_frozen_mask, h_frozen_mask, B * sizeof(uint8_t));
+    } else {
+        memset(bufs.d_frozen_mask, 0, B * sizeof(uint8_t));
+        bufs.d_frozen_mask[0] = 1;
+    }
     *bufs.d_converged = 0;
-    *bufs.d_active_count = (int32_t)B;
+    *bufs.d_active_count = (int32_t)(B > 1 ? B - 1 : 0);
 }
 
 void diff_device_get_canvas(const DeviceDiffusionBuffers& bufs, int32_t* h_canvas, float* h_conf, uint8_t* h_frozen_mask, size_t B, void*, float* h_entropy) {
@@ -67,22 +73,29 @@ void diff_device_sample_and_anchor(
     const float* d_logits,
     const int32_t* d_active_indices,
     size_t W_active,
+    size_t B,
     size_t n_vocab,
     float freeze_threshold,
     DeviceDiffusionBuffers& bufs,
     void*,
-    float momentum_beta
+    float momentum_beta,
+    int pass_m,
+    bool is_final_pass
 ) {
-    for (size_t i = 0; i < bufs.capacity; ++i) {
+    if (W_active == 0 || B <= 1) return;
+
+    for (size_t i = 0; i < B; ++i) {
         if (bufs.d_frozen_mask[i] == 1) {
             bufs.d_canvas_out[i] = bufs.d_canvas_in[i];
         }
     }
 
     for (size_t r = 0; r < W_active; ++r) {
-        int32_t b = d_active_indices ? d_active_indices[r] : static_cast<int32_t>(r);
-        const float* row = d_logits + (r * n_vocab);
-        float* row_ema = bufs.d_logits_ema ? (bufs.d_logits_ema + (b * n_vocab)) : nullptr;
+        int32_t b = d_active_indices ? d_active_indices[r] : static_cast<int32_t>(r + 1);
+        if (b <= 0 || b >= static_cast<int32_t>(B)) continue;
+
+        const float* row = d_logits + (static_cast<size_t>(b - 1) * n_vocab);
+        float* row_ema = bufs.d_logits_ema ? (bufs.d_logits_ema + (static_cast<size_t>(b) * n_vocab)) : nullptr;
 
         float max_val = -1e30f;
         int32_t best_tok = 0;
@@ -113,14 +126,46 @@ void diff_device_sample_and_anchor(
         bufs.d_canvas_out[b] = best_tok;
         bufs.d_confidences[b] = conf;
         if (bufs.d_entropies) bufs.d_entropies[b] = ent;
-
-        if (conf >= freeze_threshold) {
-            bufs.d_frozen_mask[b] = 1;
-        }
     }
+
+    diff_device_check_convergence(bufs, B, freeze_threshold, pass_m, is_final_pass, nullptr);
 }
 
-void diff_device_check_convergence(DeviceDiffusionBuffers& bufs, size_t B, void*) {
+void diff_device_check_convergence(
+    DeviceDiffusionBuffers& bufs,
+    size_t B,
+    float freeze_threshold,
+    int pass_m,
+    bool is_final_pass,
+    void*
+) {
+    bufs.d_frozen_mask[0] = 1;
+    int frontier = 1;
+    while (frontier < static_cast<int>(B) && bufs.d_frozen_mask[frontier] == 1) {
+        frontier++;
+    }
+
+    while (frontier < static_cast<int>(B)) {
+        if (pass_m == 1 && frontier > 1) {
+            break;
+        }
+
+        int b = frontier;
+        bool stable = (pass_m > 1) && (bufs.d_canvas_in[b] == bufs.d_canvas_out[b]);
+        bool confident = (bufs.d_confidences[b] >= freeze_threshold);
+
+        if (stable) {
+            bufs.d_frozen_mask[b] = 1;
+            frontier++;
+        } else if (confident) {
+            bufs.d_frozen_mask[b] = 1;
+            frontier++;
+            break;
+        } else {
+            break;
+        }
+    }
+
     int all_match = 1;
     int active_cnt = 0;
     for (size_t i = 0; i < B; ++i) {
@@ -137,6 +182,10 @@ void diff_device_check_convergence(DeviceDiffusionBuffers& bufs, size_t B, void*
 
 void diff_device_swap_canvas(DeviceDiffusionBuffers& bufs) {
     std::swap(bufs.d_canvas_in, bufs.d_canvas_out);
+}
+
+int diff_device_get_current_device() {
+    return 0;
 }
 
 } // namespace kernels
