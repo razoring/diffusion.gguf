@@ -1,6 +1,6 @@
 #include "engine.h"
 #include "init_guess.h"
-#include "scheduler_jacobi.h"
+#include "scheduler.h"
 #include "os/os_tuning.h"
 #include <algorithm>
 #include <stdexcept>

@@ -1,4 +1,4 @@
-#include "scheduler_jacobi.h"
+#include "scheduler.h"
 #include "kernels/reduce_logits.h"
 #include <algorithm>
 #include <chrono>
