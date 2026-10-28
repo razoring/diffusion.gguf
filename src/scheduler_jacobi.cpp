@@ -156,7 +156,7 @@ GenResult SchedulerJacobi::run(
                     StepEvent ev;
                     ev.step = result.iterations;
                     ev.committed_upto = static_cast<int>(result.tokens.size());
-                    ev.committed_new = { current_token };
+                    ev.committed_new = {};
                     ev.done = true;
                     ev.reason = stop_reason;
                     callback(ev);

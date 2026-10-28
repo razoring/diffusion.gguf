@@ -161,7 +161,7 @@ GenResult SchedulerDiffusion::run(
                     StepEvent ev;
                     ev.step = result.iterations;
                     ev.committed_upto = static_cast<int>(result.tokens.size());
-                    ev.committed_new = { current_token };
+                    ev.committed_new = {};
                     ev.done = true;
                     ev.reason = stop_reason;
                     callback(ev);
@@ -382,18 +382,14 @@ GenResult SchedulerDiffusion::run(
                 sampler_.accept(tok);
                 result.tokens.push_back(tok);
                 running_history.push_back(tok);
-                if (guesser_) {
-                    guesser_->update_ngram({tok});
-                }
-                committed_this_block.push_back(tok);
-                committed_count++;
-
                 if (tokenizer_.is_eog(tok)) {
                     stop_reason = StopReason::EOG;
                     should_stop = true;
                     break;
                 }
 
+                committed_this_block.push_back(tok);
+                committed_count++;
                 result.text += tokenizer_.piece(tok);
 
                 for (const auto& s : params.stop_strings) {

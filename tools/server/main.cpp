@@ -863,7 +863,10 @@ static GenParams parse_request_params(const json& body, const GenParams& default
     static const std::string default_stops[] = {
         "<|im_end|>",
         "<|endoftext|>",
-        "<end_of_turn>"
+        "<end_of_turn>",
+        "<turn|>",
+        "<|turn>",
+        "<start_of_turn>"
     };
     for (const auto& ds : default_stops) {
         if (std::find(params.stop_strings.begin(), params.stop_strings.end(), ds) == params.stop_strings.end()) {
