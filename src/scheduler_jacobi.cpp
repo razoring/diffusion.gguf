@@ -133,7 +133,21 @@ GenResult SchedulerJacobi::run(
             }
 
             // 1. Parallel evaluation of 1 token on GPU
+            auto t_eval_start = std::chrono::high_resolution_clock::now();
             LogitsView L = backend_.eval(&current_token, 1, P, params.logprobs, params.seq_id);
+            auto t_eval_end = std::chrono::high_resolution_clock::now();
+            int64_t eval_us = std::chrono::duration_cast<std::chrono::microseconds>(t_eval_end - t_eval_start).count();
+
+            result.telemetry.total_forward_passes++;
+            result.telemetry.total_width_sum += 1;
+            result.telemetry.max_width = std::max(result.telemetry.max_width, 1);
+            result.telemetry.min_width = std::min(result.telemetry.min_width, 1);
+            result.telemetry.degenerate_w1_passes++;
+            result.telemetry.width_pass_count[1]++;
+            result.telemetry.width_runtime_us[1] += eval_us;
+            result.telemetry.width_tokens_committed[1] += 1;
+            result.telemetry.total_tokens_committed += 1;
+            result.telemetry.shifts++;
 
             // 2. Sample next token from position P + 1 (GPU backend sampler or CPU fallback)
             int32_t next_tok = -1;
@@ -243,9 +257,37 @@ GenResult SchedulerJacobi::run(
             c.push_back(c.back());
         }
 
+        int prev_W = 0;
+        int prev_P = -1;
+        uint64_t current_dwell = 0;
+        uint64_t total_dwell_sum = 0;
+        uint64_t dwell_count = 0;
+
         while (!c.empty() && static_cast<int>(result.tokens.size()) < n_predict && result.iterations < max_iters) {
             result.iterations++;
             int B = static_cast<int>(c.size());
+
+            if (prev_W > 0) {
+                if (B > prev_W) result.telemetry.expansions++;
+                else if (B < prev_W) result.telemetry.contractions++;
+            }
+            if (prev_P >= 0) {
+                if (P != prev_P) {
+                    result.telemetry.shifts++;
+                    if (current_dwell > 0) {
+                        total_dwell_sum += current_dwell;
+                        dwell_count++;
+                    }
+                    current_dwell = 1;
+                } else {
+                    result.telemetry.stationary_passes++;
+                    current_dwell++;
+                }
+            } else {
+                current_dwell = 1;
+            }
+            prev_W = B;
+            prev_P = P;
 
             if (P + B >= backend_.n_ctx()) {
                 if (params.ctx_shift && backend_.supports_kv_shift()) {
@@ -265,7 +307,18 @@ GenResult SchedulerJacobi::run(
                 }
             }
 
+            auto t_eval_start = std::chrono::high_resolution_clock::now();
             LogitsView L = backend_.eval(c.data(), B, P, (B > 1), params.seq_id);
+            auto t_eval_end = std::chrono::high_resolution_clock::now();
+            int64_t eval_us = std::chrono::duration_cast<std::chrono::microseconds>(t_eval_end - t_eval_start).count();
+
+            result.telemetry.total_forward_passes++;
+            result.telemetry.total_width_sum += B;
+            result.telemetry.max_width = std::max(result.telemetry.max_width, B);
+            result.telemetry.min_width = std::min(result.telemetry.min_width, B);
+            if (B == 1) result.telemetry.degenerate_w1_passes++;
+            result.telemetry.width_pass_count[B]++;
+            result.telemetry.width_runtime_us[B] += eval_us;
 
             std::vector<kernels::LogitsReduction> reductions(B);
             kernels::reduce_logits_cpu(L.row(0), backend_.n_vocab(), B, reductions.data());
@@ -347,6 +400,8 @@ GenResult SchedulerJacobi::run(
             double tok_per_iter = static_cast<double>(result.tokens.size()) / result.iterations;
 
             int committed_count = static_cast<int>(committed_this_step.size());
+            result.telemetry.width_tokens_committed[B] += committed_count;
+            result.telemetry.total_tokens_committed += committed_count;
             P += committed_count;
             if (committed_count < B) {
                 backend_.kv_truncate(P, params.seq_id);
@@ -402,22 +457,45 @@ GenResult SchedulerJacobi::run(
                 }
             }
 
-            int open_slots = remaining_needed - static_cast<int>(next_c.size());
-            if (open_slots > 0) {
-                running_history.push_back(next_c.back());
-                auto probe = guesser_.make_guesses(open_slots, running_history);
-                running_history.pop_back();
+            bool block_finished = (k == B - 1) || next_c.empty();
 
-                for (int32_t g : probe) {
-                    next_c.push_back(g);
-                    if (static_cast<int>(next_c.size()) >= remaining_needed) break;
+            if (params.active_set_mode == ActiveSetMode::DISABLED || block_finished) {
+                int open_slots = remaining_needed - static_cast<int>(next_c.size());
+                if (open_slots > 0) {
+                    running_history.push_back(next_c.back());
+                    auto probe = guesser_.make_guesses(open_slots, running_history);
+                    running_history.pop_back();
+
+                    for (int32_t g : probe) {
+                        next_c.push_back(g);
+                        if (static_cast<int>(next_c.size()) >= remaining_needed) break;
+                    }
+                }
+
+                while (static_cast<int>(next_c.size()) < remaining_needed) {
+                    next_c.push_back(next_c.back());
+                }
+            } else {
+                // Active-Set Natural Collapse: retain uncommitted candidates without refilling.
+                if (params.tail_pruning == TailPruningMode::AGGRESSIVE) {
+                    int max_w = std::min(4, static_cast<int>(next_c.size()));
+                    if (static_cast<int>(next_c.size()) > max_w) {
+                        next_c.resize(max_w);
+                    }
+                } else if (params.tail_pruning == TailPruningMode::ADAPTIVE) {
+                    // Adaptive Tail-Pruning Continuum:
+                    // W <= 4: prune tail to eliminate speculative thrash at low parallelism.
+                    // W > 4: keep wider frontier to preserve GPU GEMM throughput.
+                    int cur_w = static_cast<int>(next_c.size());
+                    if (cur_w <= 4 && cur_w > 2) {
+                        next_c.resize(2);
+                    }
                 }
             }
 
-            while (static_cast<int>(next_c.size()) < remaining_needed) {
-                next_c.push_back(next_c.back());
+            if (result.telemetry.position_flips.size() < static_cast<size_t>(B_target)) {
+                result.telemetry.position_flips.resize(B_target, 0);
             }
-
             std::vector<TokenDiff> diffs;
             for (size_t j = 0; j < next_c.size(); ++j) {
                 size_t old_idx = committed_count + j;
@@ -430,6 +508,9 @@ GenResult SchedulerJacobi::run(
                         "",
                         1.0f
                     });
+                    if (j < result.telemetry.position_flips.size()) {
+                        result.telemetry.position_flips[j]++;
+                    }
                 }
             }
 
@@ -453,6 +534,12 @@ GenResult SchedulerJacobi::run(
 
             c = std::move(next_c);
         }
+
+        if (current_dwell > 0) {
+            total_dwell_sum += current_dwell;
+            dwell_count++;
+        }
+        result.telemetry.avg_lifetime_passes = dwell_count > 0 ? (static_cast<double>(total_dwell_sum) / dwell_count) : 1.0;
     }
 
     if (result.iterations >= max_iters && stop_reason == StopReason::NONE) {

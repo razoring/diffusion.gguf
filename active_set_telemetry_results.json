@@ -1,0 +1,225 @@
+{
+  "degenerate_b1": {
+    "active_set": "natural_collapse",
+    "tail_pruning": "off",
+    "block_size": 1,
+    "tokens": 256,
+    "elapsed_s": 4.111206800007494,
+    "tok_per_s": 62.26882092127629,
+    "diffusion_iterations": 256,
+    "tokens_per_iteration": 1.0,
+    "telemetry": {
+      "avg_frontier_width": 1.0,
+      "degenerate_w1_passes": 256,
+      "effective_parallelism_ratio": 1.0,
+      "empirical_throughput_by_width": {
+        "1": 63.66732232402638
+      },
+      "mobility": {
+        "avg_lifetime_passes": 0.0,
+        "contractions": 0,
+        "expansions": 0,
+        "shifts": 256,
+        "stationary_passes": 0
+      },
+      "position_flips": [],
+      "time_weighted_width_histogram": {
+        "1": 100.0
+      },
+      "total_forward_passes": 256,
+      "w_critical_detected": 1,
+      "width_pass_count": {
+        "1": 256
+      }
+    }
+  },
+  "uniform_b16": {
+    "active_set": "disabled",
+    "tail_pruning": "off",
+    "block_size": 16,
+    "tokens": 256,
+    "elapsed_s": 13.03922499998589,
+    "tok_per_s": 19.633068683167675,
+    "diffusion_iterations": 249,
+    "tokens_per_iteration": 1.0281124497991967,
+    "telemetry": {
+      "avg_frontier_width": 16.0,
+      "degenerate_w1_passes": 0,
+      "effective_parallelism_ratio": 1.0,
+      "empirical_throughput_by_width": {
+        "16": 21.196587084522054
+      },
+      "mobility": {
+        "avg_lifetime_passes": 1.0,
+        "contractions": 0,
+        "expansions": 0,
+        "shifts": 248,
+        "stationary_passes": 0
+      },
+      "position_flips": [
+        248,
+        165,
+        213,
+        226,
+        222,
+        210,
+        222,
+        225,
+        233,
+        222,
+        224,
+        223,
+        215,
+        221,
+        235,
+        248
+      ],
+      "time_weighted_width_histogram": {
+        "16": 100.0
+      },
+      "total_forward_passes": 249,
+      "w_critical_detected": 16,
+      "width_pass_count": {
+        "16": 249
+      }
+    }
+  },
+  "natural_collapse": {
+    "active_set": "natural_collapse",
+    "tail_pruning": "off",
+    "block_size": 16,
+    "tokens": 256,
+    "elapsed_s": 11.787864700017963,
+    "tok_per_s": 21.71724960497807,
+    "diffusion_iterations": 249,
+    "tokens_per_iteration": 1.0281124497991967,
+    "telemetry": {
+      "avg_frontier_width": 11.779116465863455,
+      "degenerate_w1_passes": 0,
+      "effective_parallelism_ratio": 0.7361947791164659,
+      "empirical_throughput_by_width": {
+        "10": 24.53883842504865,
+        "11": 26.71808413524694,
+        "12": 24.337792990520917,
+        "14": 22.92011084461348,
+        "15": 19.772716917450627,
+        "16": 20.39384595304521,
+        "9": 24.061771379485414
+      },
+      "mobility": {
+        "avg_lifetime_passes": 1.0,
+        "contractions": 6,
+        "expansions": 0,
+        "shifts": 248,
+        "stationary_passes": 0
+      },
+      "position_flips": [
+        248,
+        165,
+        215,
+        239,
+        226,
+        220,
+        217,
+        218,
+        233,
+        220,
+        91,
+        94,
+        70,
+        77,
+        48,
+        28
+      ],
+      "time_weighted_width_histogram": {
+        "10": 48.56416447974569,
+        "11": 2.0428880311015822,
+        "12": 9.344529568190453,
+        "14": 12.303923066958353,
+        "15": 10.581813768941792,
+        "16": 13.381991415334502,
+        "9": 3.7806896697276287
+      },
+      "total_forward_passes": 249,
+      "w_critical_detected": 9,
+      "width_pass_count": {
+        "10": 130,
+        "11": 5,
+        "12": 24,
+        "14": 29,
+        "15": 22,
+        "16": 29,
+        "9": 10
+      }
+    }
+  },
+  "adaptive_tail": {
+    "active_set": "natural_collapse",
+    "tail_pruning": "adaptive",
+    "block_size": 16,
+    "tokens": 256,
+    "elapsed_s": 11.48681500001112,
+    "tok_per_s": 22.286421431854887,
+    "diffusion_iterations": 249,
+    "tokens_per_iteration": 1.0281124497991967,
+    "telemetry": {
+      "avg_frontier_width": 11.779116465863455,
+      "degenerate_w1_passes": 0,
+      "effective_parallelism_ratio": 0.7361947791164659,
+      "empirical_throughput_by_width": {
+        "10": 26.008065676917482,
+        "11": 26.112274074428687,
+        "12": 23.798531154657134,
+        "14": 21.786752670458498,
+        "15": 21.666553623778196,
+        "16": 21.348985460629265,
+        "9": 27.47509382744542
+      },
+      "mobility": {
+        "avg_lifetime_passes": 1.0,
+        "contractions": 6,
+        "expansions": 0,
+        "shifts": 248,
+        "stationary_passes": 0
+      },
+      "position_flips": [
+        248,
+        165,
+        215,
+        239,
+        226,
+        220,
+        217,
+        218,
+        233,
+        220,
+        91,
+        94,
+        70,
+        77,
+        48,
+        28
+      ],
+      "time_weighted_width_histogram": {
+        "10": 47.64929679220242,
+        "11": 2.1737010150534877,
+        "12": 9.937636538028013,
+        "14": 13.460538789358168,
+        "15": 10.042255187960238,
+        "16": 13.293436534868357,
+        "9": 3.4431351425293117
+      },
+      "total_forward_passes": 249,
+      "w_critical_detected": 9,
+      "width_pass_count": {
+        "10": 130,
+        "11": 5,
+        "12": 24,
+        "14": 29,
+        "15": 22,
+        "16": 29,
+        "9": 10
+      }
+    }
+  }
+}
