@@ -284,8 +284,10 @@ GenResult SchedulerDiffusion::run(
             bool converged = false;
             int M_max_cur = (M_max > 0) ? M_max : 3;
 
+            int last_pass_m = 1;
             // Phase 2: Hybrid Annealed Discrete Denoising Loop (m = 1 ... M_max)
             for (int m = 1; m <= M_max_cur; ++m) {
+                last_pass_m = m;
                 result.iterations++;
                 result.total_diffusion_passes++;
 
@@ -318,7 +320,12 @@ GenResult SchedulerDiffusion::run(
                     for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + i;
                 }
 
-                // Forward pass with resident KV anchors (no intermediate kv_truncate)
+                // Rewind uncommitted KV cache before re-evaluating block in pass m > 1
+                if (m > 1) {
+                    backend_.kv_truncate(P, params.seq_id);
+                }
+
+                // Forward pass with resident KV anchors
                 L = backend_.eval_custom_pos(canvas.data(), B_cur, custom_pos.data(), true, params.seq_id);
 
                 // Quadratic freeze schedule
@@ -396,10 +403,20 @@ GenResult SchedulerDiffusion::run(
             }
 
             // Phase 3: Dynamic Frontier Commitment
-            // Commit only confirmed tokens that are properly encoded in the KV cache with valid row logits
             int k_commit = 1;
             while (k_commit < B_cur && frozen_mask[k_commit] != 0) {
                 k_commit++;
+            }
+
+            // Ensure committed tokens are encoded under strict causal attention before permanent KV commitment
+            bool last_pass_was_causal = (last_pass_m >= 3) || !params.annealed_attention;
+            if (!last_pass_was_causal) {
+                backend_.kv_truncate(P, params.seq_id);
+                std::vector<int32_t> causal_pos(k_commit);
+                for (int i = 0; i < k_commit; ++i) causal_pos[i] = P + i;
+                L = backend_.eval_custom_pos(canvas.data(), k_commit, causal_pos.data(), true, params.seq_id);
+            } else if (k_commit < B_cur) {
+                backend_.kv_truncate(P + k_commit, params.seq_id);
             }
 
             result.total_blocks++;
@@ -460,15 +477,10 @@ GenResult SchedulerDiffusion::run(
             }
 
             if (should_stop) {
-                if (committed_count < B_cur) {
+                if (last_pass_was_causal && committed_count < B_cur) {
                     backend_.kv_truncate(P + committed_count, params.seq_id);
                 }
                 break;
-            }
-
-            // Truncate KV cache to committed frontier if block partially settled
-            if (k_commit < B_cur) {
-                backend_.kv_truncate(P + k_commit, params.seq_id);
             }
 
             // Advance position P by committed tokens and update prefix logits for next block from row k_commit - 1
