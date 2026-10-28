@@ -1694,12 +1694,16 @@ int main(int argc, char** argv) {
                         std::cout.flush();
 
                         diffusion::GenResult result;
+                        std::vector<int32_t> prompt_tokens;
                         {
                             std::lock_guard<std::mutex> lock(engine_mutex);
+                            prompt_tokens = engine->tokenizer().tokenize(prompt, true, true);
                             result = engine->generate(prompt, params, callback);
                             engine->backend().kv_clear(slot->id);
                         }
                         slot_manager.release_slot(slot);
+
+                        metrics.total_prompt_tokens += prompt_tokens.size();
 
                         std::cout << "[Completed] tok=" << result.tokens.size()
                                   << " stop=" << (int)result.stop_reason
@@ -1724,7 +1728,12 @@ int main(int argc, char** argv) {
                                     {"delta", json::object()},
                                     {"finish_reason", finish_reason}
                                 }
-                            })}
+                            })},
+                            {"usage", {
+                                {"prompt_tokens", prompt_tokens.size()},
+                                {"completion_tokens", result.tokens.size()},
+                                {"total_tokens", prompt_tokens.size() + result.tokens.size()}
+                            }}
                         };
                         std::string sse = "data: " + final_chunk.dump() + "\n\ndata: [DONE]\n\n";
                         sink.write(sse.data(), sse.size());
