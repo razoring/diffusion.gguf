@@ -18,8 +18,8 @@ SchedulerDiffusion::SchedulerDiffusion(
 ) : backend_(backend),
     tokenizer_(tokenizer),
     sampler_(sampler),
-    default_block_size_(default_block_size > 0 ? default_block_size : 2),
-    default_max_diffusion_steps_(default_max_diffusion_steps > 0 ? default_max_diffusion_steps : 1),
+    default_block_size_(default_block_size > 0 ? default_block_size : 8),
+    default_max_diffusion_steps_(default_max_diffusion_steps > 0 ? default_max_diffusion_steps : 3),
     guesser_(guesser) {
     if (kernels::diff_device_alloc(device_bufs_, static_cast<size_t>(default_block_size_ * 2), backend_.n_vocab())) {
         device_bufs_allocated_ = true;

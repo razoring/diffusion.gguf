@@ -50,6 +50,7 @@ add_library(diffusion_core STATIC
     src/llama/chat_llama.cpp
     src/llama/dist_positional.cpp
     src/os/os_tuning.cpp
+    src/os/system_tuner.cpp
     src/kernels/reduce_logits_cpu.cpp
     src/kernels/diff_device_cpu.cpp
 )
@@ -59,6 +60,7 @@ if (GGML_CUDA)
     target_sources(diffusion_core PRIVATE 
         src/kernels/reduce_logits_cuda.cu
         src/kernels/diff_device.cu
+        src/os/system_tuner_cuda.cu
     )
     target_compile_definitions(diffusion_core PUBLIC DIFFUSION_USE_CUDA)
 endif()

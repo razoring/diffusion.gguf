@@ -1,4 +1,5 @@
 #include "args.h"
+#include "os/system_tuner.h"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -92,6 +93,7 @@ void print_cli_help() {
 
 CliArgs parse_cli_args(int argc, char** argv) {
     CliArgs args;
+    os::ExplicitFlags flags;
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg = argv[i];
@@ -131,12 +133,16 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.params.n_predict = next_int("-n/--predict");
         } else if (arg == "-c" || arg == "--ctx-size") {
             args.backend.n_ctx = next_int("-c/--ctx-size");
+            flags.n_ctx = true;
         } else if (arg == "-t" || arg == "--threads") {
             args.backend.n_threads = next_int("-t/--threads");
+            flags.n_threads = true;
         } else if (arg == "-ngl" || arg == "--n-gpu-layers") {
             args.backend.n_gpu_layers = next_int("-ngl/--n-gpu-layers");
+            flags.n_gpu_layers = true;
         } else if (arg == "-sm" || arg == "--split-mode") {
             std::string sm = next_str("-sm/--split-mode");
+            flags.split_mode = true;
             if (sm == "none") args.backend.split_mode = 0;
             else if (sm == "row") args.backend.split_mode = 2;
             else args.backend.split_mode = 1;
@@ -146,6 +152,7 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.backend.tensor_split_str = next_str("-ts/--tensor-split");
         } else if (arg == "-fa" || arg == "--flash-attn") {
             args.backend.flash_attn = true;
+            flags.flash_attn = true;
         } else if (arg == "--no-mmap") {
             args.backend.use_mmap = false;
         } else if (arg == "--mlock") {
@@ -271,8 +278,10 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.backend.tensor_split_str = next_str("-ts/--tensor-split");
         } else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
             args.params.block_size = next_int("--block/--block-size");
+            flags.block_size = true;
         } else if (arg == "--diffusion-steps" || arg == "--diff-steps") {
             args.params.diffusion_steps = next_int("--diffusion-steps");
+            flags.diffusion_steps = true;
         } else if (arg == "--speculative" || arg == "--speculative-mode") {
             args.params.speculative_mode = true;
         } else if (arg == "--annealed-attn") {
@@ -335,6 +344,10 @@ CliArgs parse_cli_args(int argc, char** argv) {
             std::cerr << "Error: could not open prompt file: " << args.prompt_file << "\n";
             exit(1);
         }
+    }
+
+    if (!args.backend.model_path.empty()) {
+        os::auto_tune_system(args.backend, args.params, flags, true);
     }
 
     return args;

@@ -5,6 +5,7 @@
 #endif
 
 #include "engine.h"
+#include "os/system_tuner.h"
 #include <cpp-httplib/httplib.h>
 #include <nlohmann/json.hpp>
 #include "json-schema-to-grammar.h"
@@ -640,7 +641,7 @@ static void print_server_help() {
               << "  -h, --help               Show help message\n";
 }
 
-static ServerConfig parse_server_args(int argc, char** argv) {
+static ServerConfig parse_server_args(int argc, char** argv, os::ExplicitFlags& flags) {
     ServerConfig cfg;
 
     for (int i = 1; i < argc; ++i) {
@@ -673,12 +674,22 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         else if (arg == "--port") cfg.port = next_int("--port");
         else if (arg == "-np" || arg == "--parallel") cfg.n_parallel = next_int("-np/--parallel");
         else if (arg == "--api-key") cfg.api_key = next_str("--api-key");
-        else if (arg == "-c" || arg == "--ctx-size") cfg.backend.n_ctx = next_int("-c/--ctx-size");
+        else if (arg == "-c" || arg == "--ctx-size") {
+            cfg.backend.n_ctx = next_int("-c/--ctx-size");
+            flags.n_ctx = true;
+        }
         else if (arg == "-b" || arg == "--batch-size") cfg.backend.n_batch = next_int("-b/--batch-size");
         else if (arg == "-ub" || arg == "--ubatch-size") cfg.backend.n_ubatch = next_int("-ub/--ubatch-size");
-        else if (arg == "-t" || arg == "--threads") cfg.backend.n_threads = next_int("-t/--threads");
-        else if (arg == "-ngl" || arg == "--n-gpu-layers") cfg.backend.n_gpu_layers = next_int("-ngl/--n-gpu-layers");
+        else if (arg == "-t" || arg == "--threads") {
+            cfg.backend.n_threads = next_int("-t/--threads");
+            flags.n_threads = true;
+        }
+        else if (arg == "-ngl" || arg == "--n-gpu-layers") {
+            cfg.backend.n_gpu_layers = next_int("-ngl/--n-gpu-layers");
+            flags.n_gpu_layers = true;
+        }
         else if (arg == "-fa" || arg == "--flash-attn") {
+            flags.flash_attn = true;
             if (i + 1 < argc && (std::string(argv[i + 1]) == "on" || std::string(argv[i + 1]) == "off" || std::string(argv[i + 1]) == "auto")) {
                 std::string val = argv[++i];
                 cfg.backend.flash_attn = (val == "on" || val == "auto");
@@ -686,7 +697,10 @@ static ServerConfig parse_server_args(int argc, char** argv) {
                 cfg.backend.flash_attn = true;
             }
         }
-        else if (arg == "--no-flash-attn") cfg.backend.flash_attn = false;
+        else if (arg == "--no-flash-attn") {
+            cfg.backend.flash_attn = false;
+            flags.flash_attn = true;
+        }
         else if (arg == "--kv-unified") cfg.backend.kv_unified = true;
         else if (arg == "--no-kv-unified") cfg.backend.kv_unified = false;
         else if (arg == "--no-mmap") cfg.backend.use_mmap = false;
@@ -703,6 +717,7 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         }
         else if (arg == "-sm" || arg == "--split-mode") {
             std::string sm = next_str("-sm/--split-mode");
+            flags.split_mode = true;
             if (sm == "none") cfg.backend.split_mode = 0;
             else if (sm == "row") cfg.backend.split_mode = 2;
             else if (sm == "tensor") cfg.backend.split_mode = 3;
@@ -714,8 +729,14 @@ static ServerConfig parse_server_args(int argc, char** argv) {
             cfg.default_params.speculative_mode = true;
         }
         else if (arg == "-n" || arg == "--n-predict") cfg.default_params.n_predict = next_int("-n/--n-predict");
-        else if (arg == "--block" || arg == "--block-size" || arg == "-b") cfg.default_params.block_size = next_int("--block/--block-size");
-        else if (arg == "--diffusion-steps" || arg == "--diff-steps") cfg.default_params.diffusion_steps = next_int("--diffusion-steps");
+        else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
+            cfg.default_params.block_size = next_int("--block/--block-size");
+            flags.block_size = true;
+        }
+        else if (arg == "--diffusion-steps" || arg == "--diff-steps") {
+            cfg.default_params.diffusion_steps = next_int("--diffusion-steps");
+            flags.diffusion_steps = true;
+        }
         else if (arg == "--whole-max") cfg.default_params.whole_max = next_int("--whole-max");
         else if (arg == "--init") {
             std::string s = next_str("--init");
@@ -936,13 +957,17 @@ int main(int argc, char** argv) {
         }
     }, nullptr);
 
-    diffusion::ServerConfig config = diffusion::parse_server_args(argc, argv);
+    diffusion::os::ExplicitFlags explicit_flags;
+    diffusion::ServerConfig config = diffusion::parse_server_args(argc, argv, explicit_flags);
 
     if (config.backend.model_path.empty()) {
         std::cerr << "Error: --model PATH is required.\n";
         diffusion::print_server_help();
         return 1;
     }
+
+    // Auto-tune hardware offloading, threads, and diffusion parameters if omitted by user
+    diffusion::os::auto_tune_system(config.backend, config.default_params, explicit_flags, true);
 
     if (!config.numa_mode.empty()) {
         ggml_numa_strategy strategy = GGML_NUMA_STRATEGY_DISTRIBUTE;
