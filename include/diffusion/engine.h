@@ -86,8 +86,8 @@ struct TokenLogprobs {
 struct GenParams {
     int32_t n_predict = 128;
     DecodeMode mode = DecodeMode::BLOCK;
-    int32_t block_size = 8; // Default B=8 discrete block diffusion
-    int32_t diffusion_steps = 4; // Default M=4 max diffusion steps per block
+    int32_t block_size = 2; // Default B=2 discrete block diffusion
+    int32_t diffusion_steps = 1; // Default M=1 single-pass diffusion verification
     bool speculative_mode = false; // False = pure discrete diffusion (default); True = speculative Jacobi
     int32_t whole_max = 512;
     InitStrategy init_strategy = InitStrategy::ADAPTIVE_ENTROPY;

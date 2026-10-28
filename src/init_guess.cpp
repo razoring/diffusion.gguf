@@ -118,8 +118,8 @@ std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int3
         }
     }
 
-    // In NGRAM mode (native self-diffusion), match high-confidence chained phrases
-    if (strategy_ == InitStrategy::NGRAM && !context.empty()) {
+    // In NGRAM or ADAPTIVE_ENTROPY mode (native self-diffusion), match high-confidence chained phrases
+    if ((strategy_ == InitStrategy::NGRAM || strategy_ == InitStrategy::ADAPTIVE_ENTROPY) && !context.empty()) {
         // 1. High-confidence chained phrase match from ContextTrie (order down to 1)
         auto phrase = context_trie_.chain_match(context, count, 1);
         for (int32_t tok : phrase) {

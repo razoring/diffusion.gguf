@@ -677,6 +677,7 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         else if (arg == "-b" || arg == "--batch-size") cfg.backend.n_batch = next_int("-b/--batch-size");
         else if (arg == "-ub" || arg == "--ubatch-size") cfg.backend.n_ubatch = next_int("-ub/--ubatch-size");
         else if (arg == "-t" || arg == "--threads") cfg.backend.n_threads = next_int("-t/--threads");
+        else if (arg == "-ngl" || arg == "--n-gpu-layers") cfg.backend.n_gpu_layers = next_int("-ngl/--n-gpu-layers");
         else if (arg == "-fa" || arg == "--flash-attn") {
             if (i + 1 < argc && (std::string(argv[i + 1]) == "on" || std::string(argv[i + 1]) == "off" || std::string(argv[i + 1]) == "auto")) {
                 std::string val = argv[++i];
@@ -685,6 +686,7 @@ static ServerConfig parse_server_args(int argc, char** argv) {
                 cfg.backend.flash_attn = true;
             }
         }
+        else if (arg == "--no-flash-attn") cfg.backend.flash_attn = false;
         else if (arg == "--kv-unified") cfg.backend.kv_unified = true;
         else if (arg == "--no-kv-unified") cfg.backend.kv_unified = false;
         else if (arg == "--no-mmap") cfg.backend.use_mmap = false;
@@ -1713,9 +1715,11 @@ int main(int argc, char** argv) {
                         }
                         slot_manager.release_slot(slot);
 
-                        metrics.total_prompt_tokens += prompt_tokens.size();
-
                         std::cout << "[Completed] tok=" << result.tokens.size()
+                                  << " iters=" << result.iterations
+                                  << " tok_per_iter=" << result.tok_per_iter
+                                  << " tok_per_s=" << result.tok_per_s
+                                  << " time_ms=" << result.total_time_ms
                                   << " stop=" << (int)result.stop_reason
                                   << " had_tool=" << filter.had_tool_call << "\n";
                         std::cout << "[RAW TEXT] >>>" << result.text << "<<<\n";

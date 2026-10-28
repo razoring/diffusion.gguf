@@ -275,6 +275,10 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.params.diffusion_steps = next_int("--diffusion-steps");
         } else if (arg == "--speculative" || arg == "--speculative-mode") {
             args.params.speculative_mode = true;
+        } else if (arg == "--annealed-attn") {
+            args.params.annealed_attention = true;
+        } else if (arg == "--no-annealed-attn") {
+            args.params.annealed_attention = false;
         } else if (arg == "--whole-max") {
             args.params.whole_max = next_int("--whole-max");
         } else if (arg == "--init") {
