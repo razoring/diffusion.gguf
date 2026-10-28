@@ -195,13 +195,8 @@ __global__ void diff_check_convergence_kernel(
 
         // Advance frontier contiguously along stabilized or high-confidence tokens
         while (frontier < static_cast<int>(B)) {
-            // In pass 1, frontier cannot advance past token 1
-            if (pass_m == 1 && frontier > 1) {
-                break;
-            }
-
             int b = frontier;
-            bool stable = (pass_m > 1) && (canvas_in[b] == canvas_out[b]);
+            bool stable = (canvas_in[b] == canvas_out[b]);
             bool confident = (confidences[b] >= freeze_threshold);
 
             if (stable) {

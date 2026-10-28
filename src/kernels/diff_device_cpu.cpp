@@ -146,12 +146,8 @@ void diff_device_check_convergence(
     }
 
     while (frontier < static_cast<int>(B)) {
-        if (pass_m == 1 && frontier > 1) {
-            break;
-        }
-
         int b = frontier;
-        bool stable = (pass_m > 1) && (bufs.d_canvas_in[b] == bufs.d_canvas_out[b]);
+        bool stable = (bufs.d_canvas_in[b] == bufs.d_canvas_out[b]);
         bool confident = (bufs.d_confidences[b] >= freeze_threshold);
 
         if (stable) {
