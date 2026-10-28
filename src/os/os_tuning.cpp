@@ -62,6 +62,13 @@ bool tune_process_for_inference() {
         }
     }
 
+    // 5. Disable Windows 11 EcoQoS / Power Throttling
+    PROCESS_POWER_THROTTLING_STATE power_throttling = {};
+    power_throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    power_throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    power_throttling.StateMask = 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &power_throttling, sizeof(power_throttling));
+
     return true;
 }
 
