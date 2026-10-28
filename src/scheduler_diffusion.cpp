@@ -20,7 +20,7 @@ SchedulerDiffusion::SchedulerDiffusion(
     default_block_size_(default_block_size > 0 ? default_block_size : 8),
     default_max_diffusion_steps_(default_max_diffusion_steps > 0 ? default_max_diffusion_steps : 4),
     guesser_(guesser) {
-    if (diff_device_alloc(device_bufs_, static_cast<size_t>(default_block_size_ * 2))) {
+    if (kernels::diff_device_alloc(device_bufs_, static_cast<size_t>(default_block_size_ * 2), backend_.n_vocab())) {
         device_bufs_allocated_ = true;
     }
 }
@@ -74,7 +74,7 @@ GenResult SchedulerDiffusion::run(
             kernels::diff_device_free(device_bufs_);
             device_bufs_allocated_ = false;
         }
-        if (kernels::diff_device_alloc(device_bufs_, static_cast<size_t>(B_target * 2))) {
+        if (kernels::diff_device_alloc(device_bufs_, static_cast<size_t>(B_target * 2), backend_.n_vocab())) {
             device_bufs_allocated_ = true;
         }
     }
@@ -232,13 +232,33 @@ GenResult SchedulerDiffusion::run(
                 }
             }
 
-            // Phase 1: Model-Derived Prior Seeding
-            // Token 0 at position P is sampled from prefix logits
+            // Phase 1: Model-Derived Prior Seeding & Entropy Gating
             float conf0 = 1.0f;
             int32_t x0 = sampler_.sample(prefix_logits.data(), P, &conf0);
 
-            int32_t pad_tok = tokenizer_.pad_or_fallback();
-            std::vector<int32_t> canvas(B_cur, pad_tok);
+            // Compute Shannon entropy H0 of prefix logits
+            float H0 = 0.0f;
+            float max_l0 = prefix_logits[0];
+            for (int v = 1; v < n_vocab; ++v) {
+                if (prefix_logits[v] > max_l0) max_l0 = prefix_logits[v];
+            }
+            double sum_exp0 = 0.0, sum_z_exp0 = 0.0;
+            for (int v = 0; v < n_vocab; ++v) {
+                double e = std::exp(static_cast<double>(prefix_logits[v] - max_l0));
+                sum_exp0 += e;
+                sum_z_exp0 += static_cast<double>(prefix_logits[v] - max_l0) * e;
+            }
+            if (sum_exp0 > 0.0) {
+                H0 = static_cast<float>(std::log(sum_exp0) - (sum_z_exp0 / sum_exp0));
+            }
+
+            // K=2 Branch Budget Controller (moving 100-block window)
+            bool should_branch = (params.multi_candidate_k == 2) &&
+                                 (H0 >= params.entropy_fork_threshold) &&
+                                 (get_branch_frequency_100() < params.max_branch_ratio);
+            record_branch_event(should_branch ? 1 : 0);
+
+            std::vector<int32_t> canvas(B_cur, x0);
             std::vector<float> confidences(B_cur, 0.0f);
             std::vector<uint8_t> frozen_mask(B_cur, 0);
 
@@ -246,122 +266,132 @@ GenResult SchedulerDiffusion::run(
             confidences[0] = conf0;
             frozen_mask[0] = 1; // Position 0 is already conditioned on prompt prefix
 
-            if (guesser_) {
+            if (params.init_strategy == InitStrategy::NGRAM && guesser_) {
                 running_history.push_back(x0);
                 auto guesses = guesser_->make_guesses(B_cur - 1, running_history);
                 running_history.pop_back();
                 for (size_t g = 0; g < guesses.size() && g + 1 < static_cast<size_t>(B_cur); ++g) {
                     canvas[g + 1] = guesses[g];
                 }
+            } else {
+                // Adaptive entropy / model prior: roll greedy continuation
+                for (int i = 1; i < B_cur; ++i) {
+                    canvas[i] = canvas[i - 1];
+                }
             }
 
             LogitsView L;
-
             bool converged = false;
-            // Phase 2: Iterative Discrete Denoising Loop (m = 1 ... M_max)
-            for (int m = 1; m <= M_max; ++m) {
+            int M_max_cur = (M_max > 0) ? M_max : 3;
+
+            // Phase 2: Hybrid Annealed Discrete Denoising Loop (m = 1 ... M_max)
+            for (int m = 1; m <= M_max_cur; ++m) {
                 result.iterations++;
                 result.total_diffusion_passes++;
 
-                // Formal freeze threshold schedule: theta_freeze(m) = theta0 + (1 - theta0) * (m - 1) / (M_max - 1)
-                float theta0 = 0.88f;
-                float theta_freeze = theta0 + (1.0f - theta0) * (static_cast<float>(m - 1) / std::max(1, M_max - 1));
-
                 // Partition Active Query Set vs Frozen KV Anchor Set
                 int W_active = 0;
-                std::vector<int32_t> active_indices;
-                active_indices.reserve(B_cur);
-
-                int confirmed_before_pass = 0;
-                while (confirmed_before_pass + 1 < B_cur && frozen_mask[confirmed_before_pass + 1] != 0) {
-                    confirmed_before_pass++;
+                for (int i = 0; i < B_cur; ++i) {
+                    if (frozen_mask[i] == 0) W_active++;
                 }
 
-                if (m == 1) {
-                    W_active = B_cur;
-                    for (int i = 0; i < B_cur; ++i) {
-                        active_indices.push_back(i);
+                if (m > 1 && W_active == 0) {
+                    converged = true;
+                    break;
+                }
+                result.cumulative_active_work += (m == 1 ? B_cur : W_active);
+
+                // Hybrid Annealed Attention Position Schedule
+                std::vector<int32_t> custom_pos(B_cur);
+                if (params.annealed_attention) {
+                    if (m == 1) {
+                        // Pass 1: Full diffusion attention (all canvas tokens attend bidirectionally)
+                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + B_cur - 1;
+                    } else if (m == 2) {
+                        // Pass 2: Partially annealed attention (localized lookahead)
+                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + std::min(B_cur - 1, i + 2);
+                    } else {
+                        // Pass 3+: Strict causal attention before commitment
+                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + i;
                     }
                 } else {
-                    for (int i = 0; i < B_cur; ++i) {
-                        if (frozen_mask[i] == 0) {
-                            active_indices.push_back(i);
-                        }
-                    }
-                    W_active = static_cast<int>(active_indices.size());
-                    if (W_active == 0) {
+                    for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + i;
+                }
+
+                // Forward pass with resident KV anchors (no intermediate kv_truncate)
+                L = backend_.eval_custom_pos(canvas.data(), B_cur, custom_pos.data(), true, params.seq_id);
+
+                // Quadratic freeze schedule
+                float theta0 = 0.85f;
+                float progress = static_cast<float>(m - 1) / std::max(1, M_max_cur - 1);
+                float theta_freeze = theta0 + (1.0f - theta0) * (progress * progress);
+
+                // GPU PTX Denoising Kernel if device buffers allocated
+                if (device_bufs_allocated_ && L.data) {
+                    kernels::diff_device_set_canvas(device_bufs_, canvas.data(), B_cur);
+                    kernels::diff_device_sample_and_anchor(
+                        L.data,
+                        nullptr,
+                        B_cur,
+                        n_vocab,
+                        theta_freeze,
+                        device_bufs_,
+                        nullptr,
+                        params.momentum_beta
+                    );
+                    kernels::diff_device_get_canvas(
+                        device_bufs_,
+                        canvas.data(),
+                        confidences.data(),
+                        frozen_mask.data(),
+                        B_cur
+                    );
+                    frozen_mask[0] = 1; // Preserve prefix token 0
+
+                    int remaining_active = kernels::diff_device_get_active_count(device_bufs_);
+                    if (remaining_active == 0 || kernels::diff_device_is_converged(device_bufs_)) {
                         converged = true;
                         break;
                     }
+                } else {
+                    // CPU fallback denoising path
+                    bool all_frozen = true;
+                    for (int i = 1; i < B_cur; ++i) {
+                        const float* row = L.row(i - 1);
+                        if (!row) row = backend_.get_logits_ith(i - 1);
+                        if (!row) break;
 
-                    // Reset KV cache to start of block so new canvas pass overwrites [P, P + B_cur)
-                    backend_.kv_truncate(P, params.seq_id);
-                }
+                        float max_val = row[0];
+                        int32_t best_tok = 0;
+                        for (int v = 1; v < n_vocab; ++v) {
+                            if (row[v] > max_val) {
+                                max_val = row[v];
+                                best_tok = v;
+                            }
+                        }
 
-                // Primary KPI: Cumulative Active Work tracking
-                result.cumulative_active_work += W_active;
+                        double sum_exp = 0.0;
+                        for (int v = 0; v < n_vocab; ++v) {
+                            sum_exp += std::exp(static_cast<double>(row[v] - max_val));
+                        }
+                        float conf = sum_exp > 0.0 ? static_cast<float>(1.0 / sum_exp) : 1.0f;
+                        confidences[i] = conf;
 
-                // Build batch active mask: row i-1 needs logits if position i is active (unfrozen).
-                // Row B_cur - 1 needs logits for next block's prefix seed.
-                std::vector<uint8_t> batch_active_mask(B_cur, 0);
-                for (int i = 1; i < B_cur; ++i) {
-                    if (frozen_mask[i] == 0) {
-                        batch_active_mask[i - 1] = 1;
-                    }
-                }
-                batch_active_mask[B_cur - 1] = 1;
+                        bool stable = (canvas[i] == best_tok);
+                        canvas[i] = best_tok;
 
-                // Forward pass with sparse active queries (skips lm_head for frozen anchors)
-                L = backend_.eval_active(canvas.data(), B_cur, P, batch_active_mask.data(), params.seq_id);
-
-                // Denoise active positions and propagate verified frontier
-                int confirmed_frontier = confirmed_before_pass;
-                for (int i = 1; i < B_cur; ++i) {
-                    if (i <= confirmed_before_pass) {
-                        continue; // Already verified in KV cache from prior pass
-                    }
-
-                    // Position i is predicted by row i - 1 in the batch
-                    const float* row = backend_.get_logits_ith(i - 1);
-                    if (!row) row = L.row(i - 1);
-                    if (!row) break;
-
-                    // Argmax & confidence
-                    float max_val = row[0];
-                    int32_t best_tok = 0;
-                    for (int v = 1; v < n_vocab; ++v) {
-                        if (row[v] > max_val) {
-                            max_val = row[v];
-                            best_tok = v;
+                        if (stable || conf >= theta_freeze || m == M_max_cur) {
+                            frozen_mask[i] = 1;
+                        } else {
+                            frozen_mask[i] = 0;
+                            all_frozen = false;
                         }
                     }
 
-                    double sum_exp = 0.0;
-                    for (int v = 0; v < n_vocab; ++v) {
-                        sum_exp += std::exp(row[v] - max_val);
-                    }
-                    float conf = (sum_exp > 0.0) ? static_cast<float>(1.0 / sum_exp) : 1.0f;
-                    confidences[i] = conf;
-
-                    bool matched_guess = (best_tok == canvas[i]);
-                    canvas[i] = best_tok;
-
-                    // A token is confirmed in the KV cache only if its predecessor was verified
-                    // and this position matched the input evaluated by the model in this pass.
-                    if (confirmed_frontier >= i - 1 && matched_guess) {
-                        frozen_mask[i] = 1;
-                        confirmed_frontier = i;
-                    } else {
-                        // Guess did not match or predecessor unverified: canvas updated for next pass
-                        frozen_mask[i] = 0;
+                    if (all_frozen) {
+                        converged = true;
                         break;
                     }
-                }
-
-                // Check convergence: all tokens in block confirmed frozen
-                if (confirmed_frontier >= B_cur - 1) {
-                    converged = true;
-                    break;
                 }
             }
 

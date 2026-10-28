@@ -13,7 +13,8 @@ enum class DecodeMode {
 };
 
 enum class InitStrategy {
-    NGRAM = 0,
+    ADAPTIVE_ENTROPY = 0,
+    NGRAM,
     RANDOM,
     PAD,
     DRAFT
@@ -89,10 +90,18 @@ struct GenParams {
     int32_t diffusion_steps = 4; // Default M=4 max diffusion steps per block
     bool speculative_mode = false; // False = pure discrete diffusion (default); True = speculative Jacobi
     int32_t whole_max = 512;
-    InitStrategy init_strategy = InitStrategy::NGRAM;
+    InitStrategy init_strategy = InitStrategy::ADAPTIVE_ENTROPY;
     int32_t ngram_n = 3;
     int32_t ngram_pool_max = 4096;
     int32_t max_iters = 0; // 0 = default (n_predict + 8)
+
+    // Hybrid Annealed Diffusion Attention & K=2 Branch Budget
+    bool annealed_attention = true;
+    float entropy_fork_threshold = 0.85f;
+    float entropy_det_threshold = 0.40f;
+    float max_branch_ratio = 0.20f; // 100-block sliding window budget controller (max 20% branching)
+    float momentum_beta = 0.30f;
+    int32_t multi_candidate_k = 2; // Locked to 2 (K=4 rejected)
 
     // Speculative draft model options
     std::string model_draft;
