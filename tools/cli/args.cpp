@@ -271,6 +271,10 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.backend.tensor_split_str = next_str("-ts/--tensor-split");
         } else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
             args.params.block_size = next_int("--block/--block-size");
+        } else if (arg == "--diffusion-steps" || arg == "--diff-steps") {
+            args.params.diffusion_steps = next_int("--diffusion-steps");
+        } else if (arg == "--speculative" || arg == "--speculative-mode") {
+            args.params.speculative_mode = true;
         } else if (arg == "--whole-max") {
             args.params.whole_max = next_int("--whole-max");
         } else if (arg == "--init") {

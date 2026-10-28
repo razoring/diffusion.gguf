@@ -703,12 +703,12 @@ static ServerConfig parse_server_args(int argc, char** argv) {
         }
         else if (arg == "-ts" || arg == "--tensor-split") cfg.backend.tensor_split_str = next_str("-ts/--tensor-split");
         else if (arg == "--main-gpu") cfg.backend.main_gpu = next_int("--main-gpu");
-        else if (arg == "--speculative") {
-            // Experimental opt-in for speculative block size
-            cfg.default_params.block_size = next_int("--speculative");
+        else if (arg == "--speculative" || arg == "--speculative-mode") {
+            cfg.default_params.speculative_mode = true;
         }
         else if (arg == "-n" || arg == "--n-predict") cfg.default_params.n_predict = next_int("-n/--n-predict");
-        else if (arg == "--block") cfg.default_params.block_size = next_int("--block");
+        else if (arg == "--block" || arg == "--block-size" || arg == "-b") cfg.default_params.block_size = next_int("--block/--block-size");
+        else if (arg == "--diffusion-steps" || arg == "--diff-steps") cfg.default_params.diffusion_steps = next_int("--diffusion-steps");
         else if (arg == "--whole-max") cfg.default_params.whole_max = next_int("--whole-max");
         else if (arg == "--init") {
             std::string s = next_str("--init");
@@ -893,6 +893,8 @@ static GenParams parse_request_params(const json& body, const GenParams& default
         else if (m == "block") params.mode = DecodeMode::BLOCK;
 
         if (diff.contains("block_size")) params.block_size = diff["block_size"].get<int>();
+        if (diff.contains("diffusion_steps")) params.diffusion_steps = diff["diffusion_steps"].get<int>();
+        if (diff.contains("speculative_mode")) params.speculative_mode = diff["speculative_mode"].get<bool>();
         if (diff.contains("whole_max")) params.whole_max = diff["whole_max"].get<int>();
         if (diff.contains("max_iters")) params.max_iters = diff["max_iters"].get<int>();
         if (diff.contains("init")) {
@@ -1275,7 +1277,12 @@ int main(int argc, char** argv) {
                     {"completion_tokens", result.tokens.size()},
                     {"total_tokens", prompt_tokens.size() + result.tokens.size()},
                     {"diffusion_iterations", result.iterations},
-                    {"tokens_per_iteration", result.tok_per_iter}
+                    {"tokens_per_iteration", result.tok_per_iter},
+                    {"cumulative_active_work", result.cumulative_active_work},
+                    {"total_diffusion_passes", result.total_diffusion_passes},
+                    {"avg_active_tokens_per_pass", result.avg_active_tokens_per_pass},
+                    {"total_blocks", result.total_blocks},
+                    {"avg_passes_per_block", result.avg_passes_per_block}
                 }}
             };
             res.set_content(resp.dump(), "application/json");
@@ -1562,7 +1569,12 @@ int main(int argc, char** argv) {
                     {"completion_tokens", result.tokens.size()},
                     {"total_tokens", prompt_tokens.size() + result.tokens.size()},
                     {"diffusion_iterations", result.iterations},
-                    {"tokens_per_iteration", result.tok_per_iter}
+                    {"tokens_per_iteration", result.tok_per_iter},
+                    {"cumulative_active_work", result.cumulative_active_work},
+                    {"total_diffusion_passes", result.total_diffusion_passes},
+                    {"avg_active_tokens_per_pass", result.avg_active_tokens_per_pass},
+                    {"total_blocks", result.total_blocks},
+                    {"avg_passes_per_block", result.avg_passes_per_block}
                 }}
             };
             res.set_content(resp.dump(), "application/json");
