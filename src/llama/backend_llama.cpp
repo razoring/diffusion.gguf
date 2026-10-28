@@ -76,6 +76,7 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     cparams.op_offload = true;
     cparams.no_perf = true;
     cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;
+    cparams.n_rs_seq = 64; // Enable recurrent-state rollback snapshots for hybrid models (Gemma 4, etc.)
     cparams.type_k = parse_ggml_type(config.cache_type_k);
     cparams.type_v = parse_ggml_type(config.cache_type_v);
     bool quant_v = (cparams.type_v != GGML_TYPE_F16 && cparams.type_v != GGML_TYPE_F32);

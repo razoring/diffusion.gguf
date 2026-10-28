@@ -97,9 +97,19 @@ GenResult Engine::generate(
         SchedulerJacobi scheduler(*backend_, *tokenizer_, *sampler, guesser);
         result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
     } else {
+        InitGuesser guesser(
+            strat,
+            *tokenizer_,
+            backend_->n_vocab(),
+            params.sampling.seed,
+            params.ngram_n,
+            params.ngram_pool_max,
+            draft_backend.get(),
+            draft_sampler.get()
+        );
         int b_size = (params.block_size > 0) ? params.block_size : 8;
         int diff_steps = (params.diffusion_steps > 0) ? params.diffusion_steps : 4;
-        SchedulerDiffusion scheduler(*backend_, *tokenizer_, *sampler, b_size, diff_steps);
+        SchedulerDiffusion scheduler(*backend_, *tokenizer_, *sampler, b_size, diff_steps, &guesser);
         result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
     }
 

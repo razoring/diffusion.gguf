@@ -1,4 +1,5 @@
 #include "scheduler_diffusion.h"
+#include "init_guess.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -11,12 +12,14 @@ SchedulerDiffusion::SchedulerDiffusion(
     const ITokenizer& tokenizer,
     ISamplerChain& sampler,
     int default_block_size,
-    int default_max_diffusion_steps
+    int default_max_diffusion_steps,
+    InitGuesser* guesser
 ) : backend_(backend),
     tokenizer_(tokenizer),
     sampler_(sampler),
     default_block_size_(default_block_size > 0 ? default_block_size : 8),
-    default_max_diffusion_steps_(default_max_diffusion_steps > 0 ? default_max_diffusion_steps : 4) {
+    default_max_diffusion_steps_(default_max_diffusion_steps > 0 ? default_max_diffusion_steps : 4),
+    guesser_(guesser) {
     if (diff_device_alloc(device_bufs_, static_cast<size_t>(default_block_size_ * 2))) {
         device_bufs_allocated_ = true;
     }
@@ -101,6 +104,11 @@ GenResult SchedulerDiffusion::run(
 
     int P = prompt_len;
     StopReason stop_reason = StopReason::NONE;
+
+    std::vector<int32_t> running_history = effective_prompt;
+    if (guesser_) {
+        guesser_->update_ngram(effective_prompt);
+    }
 
     // Buffer prefix logits predicting position P
     int n_vocab = backend_.n_vocab();
@@ -229,18 +237,27 @@ GenResult SchedulerDiffusion::run(
             float conf0 = 1.0f;
             int32_t x0 = sampler_.sample(prefix_logits.data(), P, &conf0);
 
-            std::vector<int32_t> canvas(B_cur, x0);
+            int32_t pad_tok = tokenizer_.pad_or_fallback();
+            std::vector<int32_t> canvas(B_cur, pad_tok);
             std::vector<float> confidences(B_cur, 0.0f);
             std::vector<uint8_t> frozen_mask(B_cur, 0);
 
             canvas[0] = x0;
             confidences[0] = conf0;
-            if (conf0 >= 0.88f) {
-                frozen_mask[0] = 1;
+            frozen_mask[0] = 1; // Position 0 is already conditioned on prompt prefix
+
+            if (guesser_) {
+                running_history.push_back(x0);
+                auto guesses = guesser_->make_guesses(B_cur - 1, running_history);
+                running_history.pop_back();
+                for (size_t g = 0; g < guesses.size() && g + 1 < static_cast<size_t>(B_cur); ++g) {
+                    canvas[g + 1] = guesses[g];
+                }
             }
 
             LogitsView L;
 
+            bool converged = false;
             // Phase 2: Iterative Discrete Denoising Loop (m = 1 ... M_max)
             for (int m = 1; m <= M_max; ++m) {
                 result.iterations++;
@@ -255,32 +272,36 @@ GenResult SchedulerDiffusion::run(
                 std::vector<int32_t> active_indices;
                 active_indices.reserve(B_cur);
 
+                int confirmed_before_pass = 0;
+                while (confirmed_before_pass + 1 < B_cur && frozen_mask[confirmed_before_pass + 1] != 0) {
+                    confirmed_before_pass++;
+                }
+
                 if (m == 1) {
-                    // Pass 1: Full block evaluation to establish initial representations
                     W_active = B_cur;
                     for (int i = 0; i < B_cur; ++i) {
                         active_indices.push_back(i);
                     }
                 } else {
                     for (int i = 0; i < B_cur; ++i) {
-                        if (confidences[i] >= theta_freeze) {
-                            frozen_mask[i] = 1;
-                        } else {
-                            frozen_mask[i] = 0;
+                        if (frozen_mask[i] == 0) {
                             active_indices.push_back(i);
                         }
                     }
                     W_active = static_cast<int>(active_indices.size());
                     if (W_active == 0) {
-                        // Fixed point reached early: all tokens locked
+                        converged = true;
                         break;
                     }
+
+                    // Reset KV cache to start of block so new canvas pass overwrites [P, P + B_cur)
+                    backend_.kv_truncate(P, params.seq_id);
                 }
 
                 // Primary KPI: Cumulative Active Work tracking
                 result.cumulative_active_work += W_active;
 
-                // Build batch active mask: row i-1 needs logits if position i is active.
+                // Build batch active mask: row i-1 needs logits if position i is active (unfrozen).
                 // Row B_cur - 1 needs logits for next block's prefix seed.
                 std::vector<uint8_t> batch_active_mask(B_cur, 0);
                 for (int i = 1; i < B_cur; ++i) {
@@ -293,19 +314,19 @@ GenResult SchedulerDiffusion::run(
                 // Forward pass with sparse active queries (skips lm_head for frozen anchors)
                 L = backend_.eval_active(canvas.data(), B_cur, P, batch_active_mask.data(), params.seq_id);
 
-                // Denoise active positions
-                bool changed = false;
+                // Denoise active positions and propagate verified frontier
+                int confirmed_frontier = confirmed_before_pass;
                 for (int i = 1; i < B_cur; ++i) {
-                    if (frozen_mask[i] != 0) {
-                        continue; // Frozen token: remains static anchor
+                    if (i <= confirmed_before_pass) {
+                        continue; // Already verified in KV cache from prior pass
                     }
 
-                    // Position i is predicted by position i - 1 in the batch
+                    // Position i is predicted by row i - 1 in the batch
                     const float* row = backend_.get_logits_ith(i - 1);
                     if (!row) row = L.row(i - 1);
-                    if (!row) continue;
+                    if (!row) break;
 
-                    // Compute argmax and top softmax probability
+                    // Argmax & confidence
                     float max_val = row[0];
                     int32_t best_tok = 0;
                     for (int v = 1; v < n_vocab; ++v) {
@@ -320,34 +341,50 @@ GenResult SchedulerDiffusion::run(
                         sum_exp += std::exp(row[v] - max_val);
                     }
                     float conf = (sum_exp > 0.0) ? static_cast<float>(1.0 / sum_exp) : 1.0f;
-
-                    if (best_tok != canvas[i]) {
-                        canvas[i] = best_tok;
-                        changed = true;
-                    }
                     confidences[i] = conf;
 
-                    if (conf >= theta_freeze) {
+                    bool matched_guess = (best_tok == canvas[i]);
+                    canvas[i] = best_tok;
+
+                    // A token is confirmed in the KV cache only if its predecessor was verified
+                    // and this position matched the input evaluated by the model in this pass.
+                    if (confirmed_frontier >= i - 1 && matched_guess) {
                         frozen_mask[i] = 1;
+                        confirmed_frontier = i;
+                    } else {
+                        // Guess did not match or predecessor unverified: canvas updated for next pass
+                        frozen_mask[i] = 0;
+                        break;
                     }
                 }
 
-                // Check early exit stationarity: no active token changed state
-                if (m > 1 && !changed) {
+                // Check convergence: all tokens in block confirmed frozen
+                if (confirmed_frontier >= B_cur - 1) {
+                    converged = true;
                     break;
                 }
             }
 
-            // Phase 3: Commit Block & Stream
+            // Phase 3: Dynamic Frontier Commitment
+            // Commit only confirmed tokens that are properly encoded in the KV cache with valid row logits
+            int k_commit = 1;
+            while (k_commit < B_cur && frozen_mask[k_commit] != 0) {
+                k_commit++;
+            }
+
             result.total_blocks++;
             std::vector<int32_t> committed_this_block;
             bool should_stop = false;
             int committed_count = 0;
 
-            for (int j = 0; j < B_cur; ++j) {
+            for (int j = 0; j < k_commit; ++j) {
                 int32_t tok = canvas[j];
                 sampler_.accept(tok);
                 result.tokens.push_back(tok);
+                running_history.push_back(tok);
+                if (guesser_) {
+                    guesser_->update_ngram({tok});
+                }
                 committed_this_block.push_back(tok);
                 committed_count++;
 
@@ -403,10 +440,15 @@ GenResult SchedulerDiffusion::run(
                 break;
             }
 
-            // Advance position P and update prefix logits for next block from row B_cur - 1
-            P += B_cur;
-            const float* next_p_row = backend_.get_logits_ith(B_cur - 1);
-            if (!next_p_row) next_p_row = L.row(B_cur - 1);
+            // Truncate KV cache to committed frontier if block partially settled
+            if (k_commit < B_cur) {
+                backend_.kv_truncate(P + k_commit, params.seq_id);
+            }
+
+            // Advance position P by committed tokens and update prefix logits for next block from row k_commit - 1
+            P += k_commit;
+            const float* next_p_row = backend_.get_logits_ith(k_commit - 1);
+            if (!next_p_row) next_p_row = L.row(k_commit - 1);
             if (next_p_row) {
                 std::copy(next_p_row, next_p_row + n_vocab, prefix_logits.begin());
             }

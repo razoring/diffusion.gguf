@@ -25,6 +25,8 @@ namespace diffusion {
  * 4. In-VRAM device reduction and warp-ballot fixed-point stationarity check.
  * 5. Cumulative active work C_effective KPI measurement.
  */
+class InitGuesser;
+
 class SchedulerDiffusion : public IScheduler {
 public:
     SchedulerDiffusion(
@@ -32,7 +34,8 @@ public:
         const ITokenizer& tokenizer,
         ISamplerChain& sampler,
         int default_block_size = 8,
-        int default_max_diffusion_steps = 4
+        int default_max_diffusion_steps = 4,
+        InitGuesser* guesser = nullptr
     );
 
     ~SchedulerDiffusion() override;
@@ -62,6 +65,7 @@ private:
     ISamplerChain& sampler_;
     int default_block_size_;
     int default_max_diffusion_steps_;
+    InitGuesser* guesser_ = nullptr;
 
     kernels::DeviceDiffusionBuffers device_bufs_;
     bool device_bufs_allocated_ = false;
