@@ -24,7 +24,11 @@ GenResult Engine::generate(
     const StepCallback& callback
 ) {
     if (prompt.empty()) return GenResult{};
-    std::vector<int32_t> prompt_tokens = tokenizer_->tokenize(prompt, true, true);
+    std::vector<int32_t> prompt_tokens = tokenizer_->tokenize(prompt, false, true);
+    int32_t b = tokenizer_->bos();
+    if (b >= 0 && (prompt_tokens.empty() || prompt_tokens.front() != b)) {
+        prompt_tokens.insert(prompt_tokens.begin(), b);
+    }
     return generate(prompt_tokens, params, 0, callback);
 }
 

@@ -1573,7 +1573,7 @@ int main(int argc, char** argv) {
         if (!stream) {
             {
                 std::lock_guard<std::mutex> lock(engine_mutex);
-                prompt_tokens = engine->tokenizer().tokenize(prompt, true, true);
+                prompt_tokens = engine->tokenizer().tokenize(prompt, false, true);
                 result = engine->generate(prompt, params);
                 engine->backend().kv_clear(slot->id);
             }
