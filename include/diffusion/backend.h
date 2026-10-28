@@ -36,6 +36,12 @@ public:
         return eval(toks, n, pos0, true, seq_id);
     }
 
+    // Evaluates tokens with custom position mapping (e.g. for annealed diffusion attention schedules)
+    virtual LogitsView eval_custom_pos(const int32_t* toks, int n, const int32_t* custom_pos, bool want_all = true, int32_t seq_id = 0) {
+        (void)custom_pos;
+        return eval(toks, n, custom_pos ? custom_pos[0] : 0, want_all, seq_id);
+    }
+
     // Direct access to logits of the i-th token in the last batch (or nullptr if logits[i] == 0)
     virtual const float* get_logits_ith(int32_t i) const {
         (void)i;

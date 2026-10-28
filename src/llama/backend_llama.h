@@ -75,6 +75,7 @@ public:
 
     LogitsView eval(const int32_t* toks, int n, int pos0, bool want_all, int32_t seq_id = 0) override;
     LogitsView eval_active(const int32_t* toks, int n, int pos0, const uint8_t* active_mask, int32_t seq_id = 0) override;
+    LogitsView eval_custom_pos(const int32_t* toks, int n, const int32_t* custom_pos, bool want_all = true, int32_t seq_id = 0) override;
     const float* get_logits_ith(int32_t i) const override;
     bool set_sampler(int32_t seq_id, void* sampler) override;
     int32_t get_sampled_token(int32_t idx = 0) const override;

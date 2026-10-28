@@ -29,3 +29,11 @@ target_include_directories(test_diffusion_mock PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(test_diffusion_mock PRIVATE diffusion_core)
 add_test(NAME test_diffusion_mock COMMAND test_diffusion_mock)
 
+add_executable(test_pos_remapping
+    unit/test_pos_remapping.cpp
+)
+target_include_directories(test_pos_remapping PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_pos_remapping PRIVATE diffusion_core)
+add_test(NAME test_pos_remapping COMMAND test_pos_remapping)
+
+

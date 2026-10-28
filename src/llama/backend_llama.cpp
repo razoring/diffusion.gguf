@@ -279,6 +279,32 @@ LogitsView BackendLlama::eval_active(const int32_t* toks, int n, int pos0, const
     return LogitsView{logits, n_vocab_, n_outputs};
 }
 
+LogitsView BackendLlama::eval_custom_pos(const int32_t* toks, int n, const int32_t* custom_pos, bool want_all, int32_t seq_id) {
+    if (n <= 0) return LogitsView{};
+
+    if (n > batch_capacity_) {
+        llama_batch_free(batch_);
+        batch_ = llama_batch_init(n, 0, 1);
+        batch_capacity_ = n;
+    }
+
+    for (int i = 0; i < n; ++i) {
+        batch_.token[i] = toks[i];
+        batch_.pos[i] = custom_pos ? custom_pos[i] : i;
+        batch_.n_seq_id[i] = 1;
+        batch_.seq_id[i][0] = seq_id;
+        batch_.logits[i] = (want_all || i == n - 1) ? 1 : 0;
+    }
+    batch_.n_tokens = n;
+
+    if (llama_decode(ctx_, batch_) != 0) {
+        throw std::runtime_error("llama_decode failed during eval_custom_pos");
+    }
+
+    const float* logits = llama_get_logits(ctx_);
+    return LogitsView{logits, n_vocab_, want_all ? n : 1};
+}
+
 const float* BackendLlama::get_logits_ith(int32_t i) const {
     if (!ctx_) return nullptr;
     return llama_get_logits_ith(ctx_, i);
