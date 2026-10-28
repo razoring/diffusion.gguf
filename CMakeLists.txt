@@ -43,6 +43,7 @@ add_library(diffusion_core STATIC
     src/context_trie.cpp
     src/engine.cpp
     src/scheduler_jacobi.cpp
+    src/scheduler_diffusion.cpp
     src/llama/backend_llama.cpp
     src/llama/tokenizer_llama.cpp
     src/llama/sampler_llama.cpp

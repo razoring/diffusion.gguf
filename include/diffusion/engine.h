@@ -132,6 +132,13 @@ struct GenResult {
     double tok_per_s = 0.0;
     double total_time_ms = 0.0;
     StopReason stop_reason = StopReason::NONE;
+
+    // Diffusion telemetry (C_effective KPI)
+    int cumulative_active_work = 0;          // C_effective = sum W_active(m)
+    int total_diffusion_passes = 0;          // Total passes evaluated
+    double avg_active_tokens_per_pass = 0.0; // W_active_bar = C_effective / total_passes
+    int total_blocks = 0;                   // Total blocks processed
+    double avg_passes_per_block = 0.0;      // Passes per block
 };
 
 } // namespace diffusion

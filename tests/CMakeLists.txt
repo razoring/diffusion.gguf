@@ -18,3 +18,11 @@ add_executable(test_diff_device
 target_include_directories(test_diff_device PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(test_diff_device PRIVATE diffusion_core)
 add_test(NAME test_diff_device COMMAND test_diff_device)
+
+add_executable(test_diffusion_mock
+    unit/test_diffusion_mock.cpp
+)
+target_include_directories(test_diffusion_mock PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_diffusion_mock PRIVATE diffusion_core)
+add_test(NAME test_diffusion_mock COMMAND test_diffusion_mock)
+
