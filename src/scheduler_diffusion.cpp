@@ -280,8 +280,18 @@ GenResult SchedulerDiffusion::run(
                 // Primary KPI: Cumulative Active Work tracking
                 result.cumulative_active_work += W_active;
 
-                // Forward pass with canvas
-                L = backend_.eval(canvas.data(), B_cur, P, true, params.seq_id);
+                // Build batch active mask: row i-1 needs logits if position i is active.
+                // Row B_cur - 1 needs logits for next block's prefix seed.
+                std::vector<uint8_t> batch_active_mask(B_cur, 0);
+                for (int i = 1; i < B_cur; ++i) {
+                    if (frozen_mask[i] == 0) {
+                        batch_active_mask[i - 1] = 1;
+                    }
+                }
+                batch_active_mask[B_cur - 1] = 1;
+
+                // Forward pass with sparse active queries (skips lm_head for frozen anchors)
+                L = backend_.eval_active(canvas.data(), B_cur, P, batch_active_mask.data(), params.seq_id);
 
                 // Denoise active positions
                 bool changed = false;
@@ -290,8 +300,9 @@ GenResult SchedulerDiffusion::run(
                         continue; // Frozen token: remains static anchor
                     }
 
-                    // Position i is predicted by row i - 1 of forward pass
-                    const float* row = L.row(i - 1);
+                    // Position i is predicted by position i - 1 in the batch
+                    const float* row = backend_.get_logits_ith(i - 1);
+                    if (!row) row = L.row(i - 1);
                     if (!row) continue;
 
                     // Compute argmax and top softmax probability
@@ -394,7 +405,8 @@ GenResult SchedulerDiffusion::run(
 
             // Advance position P and update prefix logits for next block from row B_cur - 1
             P += B_cur;
-            const float* next_p_row = L.row(B_cur - 1);
+            const float* next_p_row = backend_.get_logits_ith(B_cur - 1);
+            if (!next_p_row) next_p_row = L.row(B_cur - 1);
             if (next_p_row) {
                 std::copy(next_p_row, next_p_row + n_vocab, prefix_logits.begin());
             }

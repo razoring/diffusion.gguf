@@ -29,6 +29,19 @@ public:
     // want_all=true -> returns logits for all n rows; want_all=false -> last row only.
     virtual LogitsView eval(const int32_t* toks, int n, int pos0, bool want_all, int32_t seq_id = 0) = 0;
 
+    // Evaluates tokens at absolute positions [pos0, pos0 + n) with active query mask.
+    // active_mask[i] != 0 indicates position i requires output logits.
+    virtual LogitsView eval_active(const int32_t* toks, int n, int pos0, const uint8_t* active_mask, int32_t seq_id = 0) {
+        (void)active_mask;
+        return eval(toks, n, pos0, true, seq_id);
+    }
+
+    // Direct access to logits of the i-th token in the last batch (or nullptr if logits[i] == 0)
+    virtual const float* get_logits_ith(int32_t i) const {
+        (void)i;
+        return nullptr;
+    }
+
     // Backend GPU Sampler Offload
     virtual bool set_sampler(int32_t seq_id, void* sampler) { (void)seq_id; (void)sampler; return false; }
     virtual int32_t get_sampled_token(int32_t idx = 0) const { (void)idx; return -1; }

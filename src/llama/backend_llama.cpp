@@ -247,6 +247,42 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
     }
 }
 
+LogitsView BackendLlama::eval_active(const int32_t* toks, int n, int pos0, const uint8_t* active_mask, int32_t seq_id) {
+    if (n <= 0) return LogitsView{};
+
+    if (n > batch_capacity_) {
+        llama_batch_free(batch_);
+        batch_ = llama_batch_init(n, 0, 1);
+        batch_capacity_ = n;
+    }
+
+    int n_outputs = 0;
+    for (int i = 0; i < n; ++i) {
+        batch_.token[i] = toks[i];
+        batch_.pos[i] = pos0 + i;
+        batch_.n_seq_id[i] = 1;
+        batch_.seq_id[i][0] = seq_id;
+        bool want_logit = (!active_mask || active_mask[i] != 0);
+        batch_.logits[i] = want_logit ? 1 : 0;
+        if (want_logit) {
+            n_outputs++;
+        }
+    }
+    batch_.n_tokens = n;
+
+    if (llama_decode(ctx_, batch_) != 0) {
+        throw std::runtime_error("llama_decode failed during eval_active");
+    }
+
+    const float* logits = llama_get_logits(ctx_);
+    return LogitsView{logits, n_vocab_, n_outputs};
+}
+
+const float* BackendLlama::get_logits_ith(int32_t i) const {
+    if (!ctx_) return nullptr;
+    return llama_get_logits_ith(ctx_, i);
+}
+
 bool BackendLlama::set_sampler(int32_t seq_id, void* sampler) {
     (void)seq_id;
     (void)sampler;
