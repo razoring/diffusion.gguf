@@ -1,177 +1,163 @@
 # diffusion.gguf
 
-High-throughput, block-parallel diffusion inference engine for standard GGUF autoregressive language models.
+High-throughput, block-parallel diffusion inference engine for standard GGUF causal language models.
 
 ---
 
 ## 1. Overview
 
-`diffusion.gguf` transforms standard causal autoregressive language models (such as Gemma, LLaMA, Qwen) into parallel block-diffusion generators without retraining.
+`diffusion.gguf` transforms standard causal autoregressive language models (such as Gemma, LLaMA, Qwen, DeepSeek) into parallel block-diffusion generators without retraining or fine-tuning.
 
-Instead of decoding strictly token-by-token ($B=1$), the engine predicts contiguous token blocks ($B=4$ to $B=8$) across iterative multi-pass diffusion refinement schedules.
+Instead of decoding strictly token-by-token ($B=1$), the engine predicts contiguous token blocks ($B=4, 8, 16$) across iterative multi-pass diffusion refinement schedules with exact KV-cache synchronization.
 
-### Key Performance Innovations:
-- **True Sparse Active Query Execution:** When active tokens converge across diffusion passes ($N=8 \to N=4 \to N=1$), backbone GEMMs and attention kernels execute *only* over active positions while reusing frozen prefix tokens directly from the KV cache.
-- **KV Anchor Locking:** Zero cache recomputation for stationary prefixes. `kv_truncate` rewinds uncommitted active tail slots before evaluating sparse wavefronts.
-- **Multi-Bucket CUDA Graph Caching:** Eliminates CUDA graph recreation overhead when switching between variable active query batch sizes ($N \in \{1, 4, 8\}$).
-- **Zero-Speculation Guarantee:** No draft models, no speculative tree verification, no autoregressive batch drafting.
-
-**Measured Result:** On Gemma 4 E4B Q4_K_M (dual RTX 3060), 3-pass block diffusion drops generation latency from $153.0\text{ ms} \to 109.1\text{ ms}$, achieving **73.33 tok/s** (+19.5% faster than baseline autoregressive llama.cpp at 61.35 tok/s).
+### Key Innovations:
+- **Diffusion-Native Block Trajectories:** Block-parallel multi-token generation with strict KV synchronization, avoiding KV desynchronization and token collapse.
+- **Sparse Active Query Execution:** When active tokens converge across diffusion passes ($N=8 \to N=4 \to N=1$), backbone GEMMs and attention kernels evaluate only active positions while reusing frozen prefix tokens directly from the KV cache.
+- **Dynamic Multi-Bucket CUDA Graph Caching:** Dedicated graph bucket allocation per batch slice, eliminating CUDA graph recreation and reallocation overhead during variable active query passes.
+- **Hardware-Aware Boot Auto-Tuning:** Dynamic VRAM and device topology detection, auto-configuring optimal layer offloading, Flash Attention, and single/multi-GPU batch parameters.
+- **Zero-Speculation Guarantee:** Pure diffusion trajectory execution without external draft models, speculative tree verification, or autoregressive drafting.
 
 ---
 
-## 2. Architecture & Directory Layout
+## 2. Benchmark Results
+
+Measured against upstream `llama.cpp` using the standardized synthetic multi-domain kernel analysis prompt under identical hardware and generation parameters:
+- **Hardware:** Dual NVIDIA GeForce RTX 3060 (24 GB VRAM)
+- **Model:** Gemma 4 E4B IT (7.52B parameters, Q4_K_M GGUF)
+- **Parameters:** Context size `32,000` tokens, Temperature `0.0` (greedy), Output limit `2,048` tokens
+- **Isolation:** Zero additional engine flags passed to either binary
+
+| Engine | Block Size ($B$) | Output Tokens | Wall Time (s) | Throughput (tok/s) | Speedup vs `llama.cpp` | Speedup vs $B=1$ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`llama.cpp`** (`llama_simple`) | 1 | 1833 | 40.95 s | **59.04 tok/s** | 1.00x | 0.82x |
+| **`diffusion.gguf`** | 1 | 1834 | 33.47 s | **71.73 tok/s** | **1.22x** | 1.00x |
+| **`diffusion.gguf`** | 4 | 1825 | 33.33 s | **71.81 tok/s** | **1.22x** | 1.00x |
+| **`diffusion.gguf`** | 8 | 1771 | 32.23 s | **72.63 tok/s** | **1.23x** | 1.01x |
+| **`diffusion.gguf`** | 16 | 1856 | 34.09 s | **70.92 tok/s** | **1.20x** | 0.99x |
+
+*Reproduce via:*
+```bash
+python tests/benchmark_block_scaling.py -n 2048 -c 32000 -temp 0.0
+```
+
+---
+
+## 3. Platform Support & Status
+
+| Platform / Backend | Support Status | Notes |
+| :--- | :---: | :--- |
+| **Windows x64 + NVIDIA CUDA** | **Full (v0.1.0)** | Tested and verified on Windows 11 with MSVC v17.14 & CUDA 12.x/13.x |
+| **Linux x64 + NVIDIA CUDA** | *Coming Soon* | In progress; CI pipeline under configuration |
+| **Linux / macOS CPU (ggml-cpu)** | *Untested* | Functional code path, but performance unoptimized |
+| **macOS Metal (ggml-metal)** | *Planned* | Awaiting Metal graph capture port |
+| **ROCm / AMD GPU** | *Planned* | Backend hooks present via GGML HIP runtime |
+
+---
+
+## 4. Architecture & Directory Layout
 
 ```
 diffusion.gguf/
-├── CMakeLists.txt        # Top-level build configuration
-├── include/              # Public engine headers
+├── CMakeLists.txt              # Top-level build configuration
+├── include/                    # Public engine headers
 ├── src/
-│   ├── engine.h / .cpp   # Top-level generation coordinator
-│   ├── scheduler_diffusion.h / .cpp # Multi-pass block scheduler
-│   ├── scheduler_jacobi.h / .cpp    # Jacobi parallel scheduler
-│   ├── context_trie.h / .cpp        # Context n-gram lookup
-│   ├── init_guess.h / .cpp          # Block initialization heuristics
-│   ├── fast_math.h       # Fast log/entropy approximations
-│   ├── kernels/          # CUDA / CPU reduction & diff kernels
-│   └── llama/            # Clean backend wrapper for llama.cpp runtime
+│   ├── engine.h / .cpp         # High-level generation coordinator
+│   ├── scheduler_diffusion.h   # Multi-pass block scheduler
+│   ├── context_trie.h / .cpp   # Context prefix lookup
+│   ├── init_guess.h / .cpp     # Block initialization heuristics
+│   ├── fast_math.h             # Fast log/entropy approximations
+│   ├── kernels/                # CUDA / CPU reduction & diff kernels
+│   └── llama/                  # llama.cpp C++ backend integration
 ├── tools/
-│   ├── cli/              # diffusion-cli interactive & batch generator
-│   └── server/           # diffusion-server HTTP endpoint
-├── patches/              # Differential patches for third_party dependencies
-│   ├── ggml_cuda_multibucket_graph.patch # Multi-bucket graph key
-│   └── llama_context_mrope_update.patch  # Context memory update
-├── scripts/
-│   ├── apply_patches.ps1 # Windows patch applicator
-│   └── apply_patches.sh  # Unix patch applicator
+│   ├── cli/                    # diffusion-cli interactive & batch generator
+│   └── server/                 # diffusion-server OpenAI-compatible HTTP API
+├── patches/                    # Patches for third_party submodules
+├── scripts/                    # Platform scripts (patching, build helpers)
 ├── tests/
-│   └── unit/             # Profilers & regression tests
+│   ├── benchmark_block_scaling.py # Automated formal benchmarking
+│   ├── llama_simple.cpp        # Pure upstream llama.cpp baseline runner
+│   └── unit/                   # Unit profilers and regression tests
 └── third_party/
-    └── llama.cpp         # Clean upstream dependency (submodule)
+    └── llama.cpp               # Upstream GGML inference framework
 ```
 
 ---
 
-## 3. Getting Started
+## 5. Getting Started (Windows + CUDA)
 
 ### Prerequisites
-- CMake 3.18+
-- C++17 compliant compiler (MSVC 2022 / Clang / GCC)
-- CUDA Toolkit 12.x+ (for CUDA acceleration)
-- Git
+- Windows 10/11 x64
+- NVIDIA GPU with Compute Capability $\ge 6.0$
+- CUDA Toolkit 12.x or 13.x
+- Visual Studio 2022 (MSVC v143+) with C++17 support
+- CMake 3.18+ & Ninja
 
-### Cloning & Applying Patches
-External dependencies in `third_party/` remain pristine in source control. Build-time patches must be applied after checkout:
+### Building from Source
 
-```bash
+```powershell
 # Clone repository with submodules
-git clone --recurse-submodules https://github.com/your-org/diffusion.gguf.git
+git clone --recurse-submodules https://github.com/razoring/diffusion.gguf.git
 cd diffusion.gguf
 
-# Apply patches to third_party dependencies:
-# On Windows (PowerShell):
+# Apply patches to third_party llama.cpp
 powershell -ExecutionPolicy Bypass -File scripts/apply_patches.ps1
 
-# On Linux / macOS (Bash):
-bash scripts/apply_patches.sh
-```
-
-### Building
-
-Using CMake and Ninja:
-```bash
-cmake -B build -G Ninja -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+# Configure and build with Ninja + CUDA
+cmake -B build-ninja-cuda -G Ninja -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+ninja -C build-ninja-cuda -j 16
 ```
 
 ---
 
-## 4. Usage
+## 6. Usage
 
-### Interactive CLI (`diffusion-cli`)
+### Interactive & Batch CLI (`diffusion-cli`)
 
-```bash
-./build/bin/diffusion-cli \
-    -m ./models/gemma-4-e4b-it-Q4_K_M.gguf \
-    -p "Explain quantum computing in three sentences:" \
-    -ngl 99 \
-    --block-size 8 \
-    --max-passes 3
+```powershell
+.\build-ninja-cuda\bin\diffusion-cli.exe `
+    -m "C:\path\to\model.gguf" `
+    -p "Write an architectural analysis of modern OS kernels:" `
+    -c 32000 `
+    -temp 0.0 `
+    -b 8 `
+    -n 2048
 ```
 
 Key arguments:
 - `-m, --model <path>`: Path to GGUF model file.
 - `-p, --prompt <text>`: Prompt string.
-- `-ngl <n>`: Number of layers to offload to GPU.
-- `--block-size <n>`: Diffusion block width (recommended: 4 to 8).
-- `--max-passes <n>`: Maximum refinement passes per block (default: 3).
+- `-c, --ctx-size <n>`: Context window size (e.g. 32000).
+- `-temp <float>`: Sampling temperature (0.0 for greedy).
+- `-b, --block-size <n>`: Block size width (1 for baseline autoregressive, 4, 8, 16 for block diffusion).
+- `-n, --n-predict <n>`: Maximum generated tokens.
 
-### Diffusion Server (`diffusion-server`)
+### OpenAI-Compatible HTTP Server (`diffusion-server`)
 
-OpenAI-compatible HTTP chat completion endpoint supporting streaming, tool-calling, and block diffusion:
+Provides an OpenAI-compatible endpoint (`/v1/chat/completions`) with Server-Sent Events (SSE) streaming and tool call support:
 
-```bash
-./build/bin/diffusion-server \
-    -m ./models/gemma-4-e4b-it-Q4_K_M.gguf \
-    -ngl 99 \
-    --host 127.0.0.1 \
-    --port 8080 \
-    --block-size 8 \
-    -c 2048
+```powershell
+.\build-ninja-cuda\bin\diffusion-server.exe `
+    -m "C:\path\to\model.gguf" `
+    -c 32000 `
+    --port 4096 `
+    -b 8
 ```
-
-#### Complete Server CLI Arguments Reference:
-
-| Argument | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| **Model & Hardware** | | | |
-| `-m, --model PATH` | `string` | *(Required)* | Path to GGUF model file |
-| `-c, --ctx-size N` | `int` | `2048` | KV context size in tokens |
-| `-ngl, --n-gpu-layers N` | `int` | `0` | Number of model layers offloaded to GPU |
-| `-t, --threads N` | `int` | `4` | Number of CPU compute threads |
-| `-b, --batch-size N` | `int` | `2048` | Logical batch size |
-| `-ub, --ubatch-size N` | `int` | `512` | Micro-batch size |
-| `-fa, --flash-attn [on\|off\|auto]` | `string/flag` | `auto` | Enable Flash Attention |
-| `--no-flash-attn` | `flag` | `false` | Explicitly disable Flash Attention |
-| `--kv-unified` / `--no-kv-unified`| `flag` | `true` | Enable/disable unified KV buffer |
-| `--no-mmap` | `flag` | `false` | Disable memory mapping for model weights |
-| `--mlock` | `flag` | `false` | Lock model memory in RAM |
-| `--numa MODE` | `string` | `""` | NUMA memory node optimization mode |
-| `--cache-type-k TYPE` | `string` | `f16` | KV cache data type for K (`f16`, `q8_0`, `q4_0`) |
-| `--cache-type-v TYPE` | `string` | `f16` | KV cache data type for V (`f16`, `q8_0`, `q4_0`) |
-| `--lora PATH` | `string` | `""` | Path to LoRA adapter to apply |
-| `-sm, --split-mode MODE` | `string` | `layer` | Multi-GPU split mode (`none`, `layer`, `row`, `tensor`) |
-| `-ts, --tensor-split SPLIT` | `string` | `""` | Comma-separated GPU VRAM split ratios |
-| `--main-gpu INDEX` | `int` | `0` | Device index of primary GPU |
-| **Networking & Concurrency** | | | |
-| `--host HOST` | `string` | `127.0.0.1` | Network interface address to listen on |
-| `--port PORT` | `int` | `8080` | TCP port to bind server |
-| `-np, --parallel N` | `int` | `1` | Number of concurrent slots / parallel sequences |
-| `--api-key KEY` | `string` | `""` | Optional Bearer API key authentication |
-| **Diffusion & Generation Defaults** | | | |
-| `--mode MODE` | `string` | `block` | Decoding mode: `block` or `whole` (`ar` is removed) |
-| `-n, --n-predict N` | `int` | `2048` | Default max generation tokens per request |
-| `--block, --block-size, -b N` | `int` | `32` | Jacobi / diffusion block size |
-| `--diffusion-steps, --diff-steps N` | `int` | `3` | Refinement passes per block |
-| `--whole-max N` | `int` | `512` | Maximum canvas size in `whole` mode |
-| `--init STRATEGY` | `string` | `adaptive` | Initial guess strategy (`ngram`, `random`, `pad`, `adaptive`) |
-| `--annealed-attn` / `--no-annealed-attn` | `flag` | `false` | Enable/disable progressive attention annealing |
-| `--speculative, --speculative-mode` | `flag` | `false` | Toggle speculative block evaluation |
-| `--temp FLOAT` | `float` | `0.8` | Default sampling temperature |
-| `--top-p FLOAT` | `float` | `0.95` | Default Top-p nucleus sampling |
-| `--top-k N` | `int` | `40` | Default Top-k sampling filter |
-| `-v, --version` | `flag` | - | Display version and exit |
-| `-h, --help` | `flag` | - | Show help message and exit |
 
 ---
 
-## 5. Benchmarks & Testing
+## 7. Current Limitations & What Needs to be Implemented
 
-Run unit tests and sparse graph transition verification:
-```bash
-# Verify sparse wavefront execution & numerical stability
-./build/bin/test_sparse_graph_transitions
+- **Scaling Ceiling at Higher Block Sizes ($B \ge 8$):** Fixed-point matching without speculation bounds commitment per pass to 1.15-1.20 tokens/iter on non-repetitive text. Multi-token jump confidence filters and latent mask roll-overs need expansion to realize the full 2x-3x theoretical speedup for $B=16$.
+- **Operating Systems & Backends:** Pre-built binary support currently restricted to Windows x64 + CUDA. Linux CUDA containerization and Metal support are underway.
+- **Logit Head Parallelism:** LM-head evaluation across entire block dimensions currently computes full projection GEMMs before masking. Sparse head evaluation will further reduce Stage 2 latency.
 
-# Measure subsystem latency breakdown across block sizes
-./build/bin/test_latency_breakdown
-```
+---
+
+## 8. Contributing
+
+Contributions are welcome. Areas where help is immediately needed:
+1. Linux CI workflows with automated CUDA 12.x builds.
+2. Apple Silicon Metal (`ggml-metal`) port for multi-bucket graph caching.
+3. Higher block size confidence models and entropy filtering heuristics for $B \ge 8$.
+
+Please review existing issues or open an RFC pull request before introducing major architectural modifications.

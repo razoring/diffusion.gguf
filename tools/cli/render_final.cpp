@@ -26,20 +26,18 @@ void RenderFinal::finish(const GenResult& result) {
         }
     }
 
-    if (args_.show_stats) {
-        std::cerr << "{\n"
-                  << "  \"tokens\": " << result.tokens.size() << ",\n"
-                  << "  \"iterations\": " << result.iterations << ",\n"
-                  << "  \"tokens_per_iteration\": " << result.tok_per_iter << ",\n"
-                  << "  \"tokens_per_second\": " << result.tok_per_s << ",\n"
-                  << "  \"cumulative_active_work\": " << result.cumulative_active_work << ",\n"
-                  << "  \"total_diffusion_passes\": " << result.total_diffusion_passes << ",\n"
-                  << "  \"avg_active_tokens_per_pass\": " << result.avg_active_tokens_per_pass << ",\n"
-                  << "  \"total_blocks\": " << result.total_blocks << ",\n"
-                  << "  \"avg_passes_per_block\": " << result.avg_passes_per_block << ",\n"
-                  << "  \"total_time_ms\": " << result.total_time_ms << "\n"
-                  << "}\n";
-    }
+    std::cerr << "{\n"
+              << "  \"tokens\": " << result.tokens.size() << ",\n"
+              << "  \"iterations\": " << result.iterations << ",\n"
+              << "  \"tokens_per_iteration\": " << result.tok_per_iter << ",\n"
+              << "  \"tokens_per_second\": " << result.tok_per_s << ",\n"
+              << "  \"cumulative_active_work\": " << result.cumulative_active_work << ",\n"
+              << "  \"total_diffusion_passes\": " << result.total_diffusion_passes << ",\n"
+              << "  \"avg_active_tokens_per_pass\": " << result.avg_active_tokens_per_pass << ",\n"
+              << "  \"total_blocks\": " << result.total_blocks << ",\n"
+              << "  \"avg_passes_per_block\": " << result.avg_passes_per_block << ",\n"
+              << "  \"total_time_ms\": " << result.total_time_ms << "\n"
+              << "}\n";
 }
 
 } // namespace diffusion

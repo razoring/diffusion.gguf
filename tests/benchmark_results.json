@@ -1,0 +1,64 @@
+{
+  "config": {
+    "model": "C:\\Users\\conta\\.ollama\\models\\blobs\\sha256-370c2879f17648d337b0ab4e208fdce348e24d1060064e93d7645daafd56d39c",
+    "ctx": 32000,
+    "temp": 0.0,
+    "predict": 2048,
+    "prompt_chars": 204
+  },
+  "results": {
+    "llama.cpp": {
+      "engine": "llama.cpp",
+      "block_size": 1,
+      "tokens": 1833,
+      "tok_per_s": 59.04,
+      "time_s": 40.95229790004669,
+      "speedup_vs_llama": 1.0,
+      "speedup_vs_b1": 1.0
+    },
+    "diffusion_b1": {
+      "engine": "diffusion.gguf",
+      "block_size": 1,
+      "tokens": 1834,
+      "tok_per_s": 71.7293,
+      "iterations": 1834,
+      "tok_per_iter": 1,
+      "time_s": 33.46795449999627,
+      "speedup_vs_llama": 1.215,
+      "speedup_vs_b1": 1.0
+    },
+    "diffusion_b4": {
+      "engine": "diffusion.gguf",
+      "block_size": 4,
+      "tokens": 1825,
+      "tok_per_s": 71.8103,
+      "iterations": 1596,
+      "tok_per_iter": 1.14348,
+      "time_s": 33.332065500027966,
+      "speedup_vs_llama": 1.216,
+      "speedup_vs_b1": 1.001
+    },
+    "diffusion_b8": {
+      "engine": "diffusion.gguf",
+      "block_size": 8,
+      "tokens": 1771,
+      "tok_per_s": 72.6332,
+      "iterations": 1523,
+      "tok_per_iter": 1.16284,
+      "time_s": 32.2302997999941,
+      "speedup_vs_llama": 1.23,
+      "speedup_vs_b1": 1.013
+    },
+    "diffusion_b16": {
+      "engine": "diffusion.gguf",
+      "block_size": 16,
+      "tokens": 1856,
+      "tok_per_s": 70.9159,
+      "iterations": 1551,
+      "tok_per_iter": 1.19665,
+      "time_s": 34.09078800003044,
+      "speedup_vs_llama": 1.201,
+      "speedup_vs_b1": 0.989
+    }
+  }
+}

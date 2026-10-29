@@ -49,15 +49,13 @@ void RenderProgress::finish(const GenResult& result) {
         }
     }
 
-    if (args_.show_stats) {
-        std::cerr << "{\n"
-                  << "  \"tokens\": " << result.tokens.size() << ",\n"
-                  << "  \"iterations\": " << result.iterations << ",\n"
-                  << "  \"tokens_per_iteration\": " << result.tok_per_iter << ",\n"
-                  << "  \"tokens_per_second\": " << result.tok_per_s << ",\n"
-                  << "  \"total_time_ms\": " << result.total_time_ms << "\n"
-                  << "}\n";
-    }
+    std::cerr << "{\n"
+              << "  \"tokens\": " << result.tokens.size() << ",\n"
+              << "  \"iterations\": " << result.iterations << ",\n"
+              << "  \"tokens_per_iteration\": " << result.tok_per_iter << ",\n"
+              << "  \"tokens_per_second\": " << result.tok_per_s << ",\n"
+              << "  \"total_time_ms\": " << result.total_time_ms << "\n"
+              << "}\n";
 }
 
 } // namespace diffusion
