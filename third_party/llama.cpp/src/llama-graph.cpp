@@ -3422,6 +3422,17 @@ void llm_graph_context::build_sampling() const {
 
     // res->t_logits will contain logits for all tokens that want the logits calculated (logits=1 or output=1)
     GGML_ASSERT(res->t_logits != nullptr && "missing t_logits tensor");
+    if (samplers.size() == 1 && logit_row_idx >= 1) {
+        const auto & [seq_id, sampler] = *samplers.begin();
+        struct llama_sampler_data data = { res->t_logits, nullptr, nullptr, nullptr };
+        assert(sampler->iface->backend_apply);
+        sampler->iface->backend_apply(sampler, ctx0, gf, &data);
+        if (data.sampled != nullptr) {
+            res->t_sampled[seq_id] = data.sampled;
+            ggml_build_forward_expand(gf, data.sampled);
+        }
+        return;
+    }
 
     // add a dummy row of logits
     // this trick makes the graph static, regardless of which samplers are activated

@@ -1,7 +1,6 @@
 #include "engine.h"
 #include "init_guess.h"
 #include "scheduler_diffusion.h"
-#include "scheduler_jacobi.h"
 #include "os/os_tuning.h"
 #include <algorithm>
 #include <stdexcept>
@@ -60,58 +59,18 @@ GenResult Engine::generate(
         throw std::runtime_error("Failed to construct sampler chain");
     }
 
-    std::unique_ptr<BackendLlama> draft_backend;
-    std::unique_ptr<SamplerLlama> draft_sampler;
-    InitStrategy strat = params.init_strategy;
-
-    if (!params.model_draft.empty()) {
-        try {
-            BackendConfig dconfig;
-            dconfig.model_path = params.model_draft;
-            dconfig.n_gpu_layers = params.draft_n_gpu_layers;
-            dconfig.n_ctx = params.n_predict + 512;
-            draft_backend = std::make_unique<BackendLlama>(dconfig);
-            draft_sampler = SamplerLlama::create(
-                draft_backend->raw_vocab(),
-                draft_backend->n_vocab(),
-                params.sampling
-            );
-            strat = InitStrategy::DRAFT;
-        } catch (...) {
-            // Gracefully fallback to n-gram if draft fails to load
-        }
-    }
-
-    GenResult result;
-    if (params.speculative_mode) {
-        InitGuesser guesser(
-            strat,
-            *tokenizer_,
-            backend_->n_vocab(),
-            params.sampling.seed,
-            params.ngram_n,
-            params.ngram_pool_max,
-            draft_backend.get(),
-            draft_sampler.get()
-        );
-        SchedulerJacobi scheduler(*backend_, *tokenizer_, *sampler, guesser);
-        result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
-    } else {
-        InitGuesser guesser(
-            strat,
-            *tokenizer_,
-            backend_->n_vocab(),
-            params.sampling.seed,
-            params.ngram_n,
-            params.ngram_pool_max,
-            draft_backend.get(),
-            draft_sampler.get()
-        );
-        int b_size = (params.block_size > 0) ? params.block_size : 8;
-        int diff_steps = (params.diffusion_steps > 0) ? params.diffusion_steps : 3;
-        SchedulerDiffusion scheduler(*backend_, *tokenizer_, *sampler, b_size, diff_steps, &guesser);
-        result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
-    }
+    InitGuesser guesser(
+        params.init_strategy,
+        *tokenizer_,
+        backend_->n_vocab(),
+        params.sampling.seed,
+        params.ngram_n,
+        params.ngram_pool_max
+    );
+    int b_size = (params.block_size > 0) ? params.block_size : 8;
+    int diff_steps = (params.diffusion_steps > 0) ? params.diffusion_steps : 3;
+    SchedulerDiffusion scheduler(*backend_, *tokenizer_, *sampler, b_size, diff_steps, &guesser);
+    GenResult result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
 
     // Save prompt cache if requested
     if (!params.prompt_cache_path.empty() && !params.prompt_cache_ro) {

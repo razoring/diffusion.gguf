@@ -77,61 +77,16 @@ void RenderLive::clear_tail() {
 }
 
 bool RenderLive::on_step(const StepEvent& ev) {
-    if (!is_tty_ || ev.canvas.size() <= 1) {
+    if (!ev.committed_new.empty()) {
         for (int32_t tok : ev.committed_new) {
             std::cout << tokenizer_.piece(tok);
         }
         std::cout.flush();
-        if (ev.done) {
-            std::cout << "\n";
-            std::cout.flush();
-        }
-        return true;
     }
-
-    auto now = std::chrono::steady_clock::now();
-    int min_interval_ms = (args_.render_fps > 0) ? (1000 / args_.render_fps) : 33;
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_render_time_).count();
-
-    if (!ev.done && elapsed_ms < min_interval_ms && ev.committed_new.empty()) {
-        return true;
-    }
-    last_render_time_ = now;
-
-    int cols = 80, rows = 24;
-    get_terminal_size(cols, rows);
-
-    // 1. Clear active tail and status line
-    clear_tail();
-
-    // 2. Output committed tokens
-    for (int32_t tok : ev.committed_new) {
-        std::string piece = tokenizer_.piece(tok);
-        std::cout << piece;
-
-        for (size_t i = 0; i < piece.size(); ++i) {
-            if (piece[i] == '\n') {
-                current_col_ = 0;
-            } else {
-                current_col_++;
-                if (cols > 0 && current_col_ >= cols) {
-                    current_col_ = 0;
-                }
-            }
-        }
-    }
-    std::cout.flush();
-
     if (ev.done) {
         std::cout << "\n";
         std::cout.flush();
-        return true;
     }
-
-    // 3. Render unconverged canvas tail and status bar
-    last_start_col_ = current_col_;
-    render_canvas_and_status(ev, cols, rows);
-
     return true;
 }
 

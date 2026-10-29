@@ -68,11 +68,10 @@ void print_cli_help() {
               << "  --mirostat N             Mirostat (0=disabled, 1=v1, 2=v2)\n\n"
               << "Diffusion Options:\n"
               << "  --mode MODE              Decoding mode: block (default), whole\n"
-              << "  --block N                Jacobi block size (default: 2)\n"
+              << "  -b, --block N            Diffusion block size (default: 8)\n"
+              << "  --diffusion-steps N      Diffusion steps per block (default: 3)\n"
               << "  --whole-max N            Max canvas size for whole mode (default: 512)\n"
-              << "  --init STRAT             Canvas init strategy: ngram (default), random, pad, draft\n"
-              << "  -md, --model-draft PATH  Path to speculative draft model GGUF\n"
-              << "  -ngld, --draft-gpu N     Number of layers to offload for draft model (default: 0)\n"
+              << "  --init STRAT             Canvas init strategy: ngram (default), random, pad\n"
               << "  --ngram-n N              N-gram context length for init guesser (default: 3)\n"
               << "  --ngram-pool N           N-gram pool max capacity (default: 4096)\n"
               << "  --max-iters N            Maximum iterations cap (default: n_predict + 8)\n"
@@ -233,11 +232,6 @@ CliArgs parse_cli_args(int argc, char** argv) {
         } else if (arg == "--reasoning-budget") {
             args.params.reasoning_budget = next_int("--reasoning-budget");
             args.params.extract_reasoning = true;
-        } else if (arg == "-md" || arg == "--model-draft") {
-            args.params.model_draft = next_str("-md/--model-draft");
-            args.params.init_strategy = InitStrategy::DRAFT;
-        } else if (arg == "-ngld" || arg == "--draft-gpu") {
-            args.params.draft_n_gpu_layers = next_int("-ngld/--draft-gpu");
         } else if (arg == "-s" || arg == "--seed") {
             args.params.sampling.seed = static_cast<uint32_t>(next_int("-s/--seed"));
         } else if (arg == "--temp") {
@@ -267,23 +261,12 @@ CliArgs parse_cli_args(int argc, char** argv) {
             } else {
                 args.params.mode = DecodeMode::BLOCK;
             }
-        } else if (arg == "--speculative") {
-            args.params.block_size = next_int("--speculative");
-        } else if (arg == "-sm" || arg == "--split-mode") {
-            std::string sm = next_str("-sm/--split-mode");
-            if (sm == "none") args.backend.split_mode = 0;
-            else if (sm == "row") args.backend.split_mode = 2;
-            else args.backend.split_mode = 1;
-        } else if (arg == "-ts" || arg == "--tensor-split") {
-            args.backend.tensor_split_str = next_str("-ts/--tensor-split");
         } else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
             args.params.block_size = next_int("--block/--block-size");
             flags.block_size = true;
         } else if (arg == "--diffusion-steps" || arg == "--diff-steps") {
             args.params.diffusion_steps = next_int("--diffusion-steps");
             flags.diffusion_steps = true;
-        } else if (arg == "--speculative" || arg == "--speculative-mode") {
-            args.params.speculative_mode = true;
         } else if (arg == "--annealed-attn") {
             args.params.annealed_attention = true;
         } else if (arg == "--no-annealed-attn") {
@@ -294,7 +277,6 @@ CliArgs parse_cli_args(int argc, char** argv) {
             std::string s = next_str("--init");
             if (s == "random") args.params.init_strategy = InitStrategy::RANDOM;
             else if (s == "pad") args.params.init_strategy = InitStrategy::PAD;
-            else if (s == "draft") args.params.init_strategy = InitStrategy::DRAFT;
             else args.params.init_strategy = InitStrategy::NGRAM;
         } else if (arg == "--ngram-n") {
             args.params.ngram_n = next_int("--ngram-n");

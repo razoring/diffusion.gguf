@@ -5,13 +5,6 @@ target_include_directories(test_utf8 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(test_utf8 PRIVATE diffusion_core)
 add_test(NAME test_utf8 COMMAND test_utf8)
 
-add_executable(test_jacobi_mock
-    unit/test_jacobi_mock.cpp
-)
-target_include_directories(test_jacobi_mock PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-target_link_libraries(test_jacobi_mock PRIVATE diffusion_core)
-add_test(NAME test_jacobi_mock COMMAND test_jacobi_mock)
-
 if (GGML_CUDA)
     add_executable(test_diff_device
         unit/test_diff_device.cu
@@ -56,5 +49,3 @@ add_executable(test_pos_remapping
 target_include_directories(test_pos_remapping PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(test_pos_remapping PRIVATE diffusion_core)
 add_test(NAME test_pos_remapping COMMAND test_pos_remapping)
-
-

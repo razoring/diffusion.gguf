@@ -84,7 +84,7 @@ void auto_tune_system(
         params.block_size = 1;
     }
     if (!flags.diffusion_steps) {
-        params.diffusion_steps = 1;
+        params.diffusion_steps = (params.block_size > 1 ? 3 : 1);
     }
 
     // 2. GPU Offloading and VRAM budget
@@ -111,8 +111,8 @@ void auto_tune_system(
             : (sys.primary_gpu_vram_bytes > 0 ? sys.primary_gpu_vram_bytes : sys.free_vram_bytes);
 
         int ctx = (backend.n_ctx > 0) ? backend.n_ctx : 2048;
-        size_t est_kv_bytes = static_cast<size_t>(ctx) * 64ULL * 1024ULL;
-        size_t est_total_needed = model_bytes + est_kv_bytes + (512ULL * 1024 * 1024);
+        size_t est_kv_bytes = static_cast<size_t>(ctx) * 16ULL * 1024ULL;
+        size_t est_total_needed = static_cast<size_t>(model_bytes * 0.85) + est_kv_bytes + (256ULL * 1024 * 1024);
 
         if (sys.gpu_count > 1 && backend.n_gpu_layers > 0 && primary_vram < est_total_needed) {
             backend.split_mode = 1; // LLAMA_SPLIT_MODE_LAYER across GPUs

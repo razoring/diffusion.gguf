@@ -119,7 +119,7 @@ llama_context::llama_context(
     cparams.cb_eval           = params.cb_eval;
     cparams.cb_eval_user_data = params.cb_eval_user_data;
 
-    cparams.ctx_other = nullptr;
+    cparams.ctx_other = params.ctx_other;
 
     // TODO: more generic
     if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
@@ -127,8 +127,6 @@ llama_context::llama_context(
             // TODO: change from runtime_error to llama_exception to avoid printing error message
             throw std::runtime_error("Gemma4Assistant requires ctx_other to be set (this warning is normal during memory fitting)");
         }
-
-        cparams.ctx_other = params.ctx_other;
     }
 
     if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_DFLASH) {
@@ -356,15 +354,19 @@ llama_context::llama_context(
 
     // init the memory module
     if (!hparams.vocab_only) {
-        llama_memory_params params_mem = {
-            /*.type_k    =*/ params.type_k,
-            /*.type_v    =*/ params.type_v,
-            /*.swa_full  =*/ params.swa_full,
-            /*.ctx_type  =*/ cparams.ctx_type,
-            /*.mem_other =*/ llama_get_memory(cparams.ctx_other),
-        };
+        if (cparams.ctx_other != nullptr && cparams.ctx_other->memory != nullptr) {
+            memory = cparams.ctx_other->memory;
+        } else {
+            llama_memory_params params_mem = {
+                /*.type_k    =*/ params.type_k,
+                /*.type_v    =*/ params.type_v,
+                /*.swa_full  =*/ params.swa_full,
+                /*.ctx_type  =*/ cparams.ctx_type,
+                /*.mem_other =*/ llama_get_memory(cparams.ctx_other),
+            };
 
-        memory.reset(model.create_memory(params_mem, cparams));
+            memory.reset(model.create_memory(params_mem, cparams));
+        }
     }
 
     // init backends
@@ -431,6 +433,7 @@ llama_context::llama_context(
         }
 
         sched_reserve();
+        output_reserve(16);
 
         if (!cparams.flash_attn) {
             if (ggml_is_quantized(params.type_v)) {
@@ -451,6 +454,16 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
+    if (active_bucket_key != 0) {
+        auto it = gf_res_buckets.find(0);
+        if (it != gf_res_buckets.end() && it->second.sched) {
+            sched       = std::move(it->second.sched);
+            gf_res_prev = std::move(it->second.res);
+        }
+        active_bucket_key = 0;
+    }
+    gf_res_buckets.clear();
+
     if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
             ggml_backend_t             backend = backend_ptrs[i];
@@ -558,6 +571,9 @@ void llama_context::sched_reserve() {
     const size_t max_nodes = this->graph_max_nodes(n_tokens);
 
     LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
+
+    gf_res_buckets.clear();
+    active_bucket_key = 0;
 
     gf_res_prev.reset(new llm_graph_result(max_nodes));
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
@@ -1198,7 +1214,7 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
 
         sampler->iface->backend_init(sampler, buft);
 
-        sampling.samplers[seq_id] = sampler;
+        sampling.samplers[seq_id] = sampler; return true;
 
         sched_need_reserve = true;
 
@@ -1217,7 +1233,7 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
         return false;
     }
 
-    sampling.samplers.erase(seq_id);
+    sampling.samplers.erase(seq_id); return true;
 
     sched_need_reserve = true;
 
@@ -1288,6 +1304,27 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
         return nullptr;
+    }
+
+    const uint64_t bucket_key = (ubatch.n_tokens <= 32)
+        ? ((uint64_t(ubatch.n_tokens) << 32) | uint64_t(n_outputs) | (sampling.samplers.empty() ? 0ULL : (1ULL << 63)))
+        : 0ULL;
+
+    if (bucket_key != active_bucket_key) {
+        if (sched) {
+            ggml_backend_sched_synchronize(sched.get());
+        }
+        gf_res_buckets[active_bucket_key] = { std::move(gf_res_prev), std::move(sched) };
+        auto it = gf_res_buckets.find(bucket_key);
+        if (it != gf_res_buckets.end() && it->second.res && it->second.sched) {
+            gf_res_prev = std::move(it->second.res);
+            sched       = std::move(it->second.sched);
+        } else {
+            const size_t max_nodes = this->graph_max_nodes(ubatch.n_tokens);
+            gf_res_prev.reset(new llm_graph_result(max_nodes));
+            sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
+        }
+        active_bucket_key = bucket_key;
     }
 
     auto * res = gf_res_prev.get();
@@ -1549,7 +1586,9 @@ static std::map<llama_seq_id, uint32_t> build_seq_to_output_row(const llama_ubat
 
         const llama_seq_id seq_id = ubatch.seq_id[i][0];
         // row_offset is the number of output tokens before this ubatch.
-        seq_to_row[seq_id] = row_offset + local;
+        if (seq_to_row.find(seq_id) == seq_to_row.end()) {
+            seq_to_row[seq_id] = row_offset + local;
+        }
         ++local;
     }
     return seq_to_row;
@@ -1576,7 +1615,7 @@ static void copy_tensor_async_ints(
         GGML_ASSERT(ggml_is_contiguous(tensor) && "sampled tokens tensor must be contiguous for async copy");
 
         ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched, tensor);
-        ggml_backend_tensor_get_async(backend, tensor, sampled.data + row, 0, sizeof(sampled.data[row]));
+        ggml_backend_tensor_get_async(backend, tensor, sampled.data + row, 0, ggml_nbytes(tensor));
     }
 }
 
@@ -1701,7 +1740,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 const llama_seq_id seq_id = batch_inp.seq_id ? batch_inp.seq_id[i][s] : 0;
 
                 seq_output_count[seq_id]++;
-                if (seq_output_count[seq_id] > 1) {
+                if (seq_output_count[seq_id] > 1 && sampling.samplers.size() > 1) {
                     LLAMA_LOG_ERROR("%s: backend sampling requires at most one output token per sequence (seq_id %d had %d)\n",
                             __func__, seq_id, seq_output_count[seq_id]);
                     return -1;
@@ -2086,7 +2125,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     }
 
     // Allocate backend sampling output buffers if there are backend samplers configured.
-    const bool has_sampling = !sampling.samplers.empty();
+    const bool has_sampling = true;
     if (has_sampling) {
         backend_float_count = 2 * n_vocab * n_outputs_max;      // logits + probs
         backend_token_count = (1 + n_vocab) * n_outputs_max;    // sampled + candidates

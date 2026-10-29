@@ -1687,7 +1687,7 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_f(const ggml_tensor * tensor) {
     use_mul_mat_vec_f = use_mul_mat_vec_f && ggml_cuda_should_use_mmvf(src0->type, cc, src0->ne, src0->nb, is_mul_mat_id ? src1->ne[2] : src1->ne[1]);
 
     //we only support fusion for ncols_dst = 1
-    if (tensor->op == GGML_OP_MUL_MAT && dst->ne[1] != 1) {
+    if (tensor->op == GGML_OP_MUL_MAT && dst->ne[1] > (ggml_is_quantized(src0->type) ? MMVQ_MAX_BATCH_SIZE : 1)) {
         return false;
     }
 
@@ -1717,7 +1717,7 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
         return false;
     }
     //we only support fusion for ncols_dst = 1
-    if (tensor->op == GGML_OP_MUL_MAT && dst->ne[1] != 1) {
+    if (tensor->op == GGML_OP_MUL_MAT && dst->ne[1] > (ggml_is_quantized(src0->type) ? MMVQ_MAX_BATCH_SIZE : 1)) {
         return false;
     }
 
@@ -2433,11 +2433,12 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
 
 static const void * ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
     if (!cgraph || cgraph->n_nodes == 0) return nullptr;
-    // Multi-bucket key: distinguish graph topology by base node, node count, and batch dimension
+    // Multi-bucket key: distinguish graph topology by base node, node count, batch dimension, and output count
     uintptr_t base = reinterpret_cast<uintptr_t>(cgraph->nodes[0]);
     uintptr_t n_nodes = static_cast<uintptr_t>(cgraph->n_nodes);
     uintptr_t n_tokens = static_cast<uintptr_t>(cgraph->nodes[0]->ne[1]);
-    uintptr_t key = base ^ (n_nodes << 20) ^ (n_tokens << 8);
+    uintptr_t n_outputs = static_cast<uintptr_t>(cgraph->nodes[cgraph->n_nodes - 1]->ne[1]);
+    uintptr_t key = base ^ (n_nodes << 20) ^ (n_tokens << 8) ^ (n_outputs << 14);
     return reinterpret_cast<const void *>(key);
 }
 
@@ -4703,6 +4704,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return op->type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
         case GGML_OP_GET_ROWS:
             {
+                if (op->src[0]->type == GGML_TYPE_Q4_K || op->src[0]->type == GGML_TYPE_Q5_K || op->src[0]->type == GGML_TYPE_Q6_K) { return true; }
                 switch (op->src[0]->type) {
                     case GGML_TYPE_F16:
                     case GGML_TYPE_F32:

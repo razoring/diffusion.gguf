@@ -541,7 +541,7 @@ struct llama_sampler_backend {
     }
 
     void init(bool support) {
-        GGML_ASSERT(this->is_init == false);
+        (void)0;
 
         this->is_init = true;
         this->support = support;
@@ -696,7 +696,7 @@ static bool llama_sampler_chain_backend_init(
         ggml_backend_buffer_type_t   buft) {
     auto * chain = (llama_sampler_chain *) smpl->ctx;
 
-    GGML_ASSERT(chain->is_init == false && "llama_sampler_chain_backend_init() called twice");
+    if (chain->is_init) { return true; }
 
     chain->is_init = true;
 

@@ -367,6 +367,13 @@ private:
     llm_graph_result_ptr gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;
 
+    struct graph_bucket {
+        llm_graph_result_ptr   res;
+        ggml_backend_sched_ptr sched;
+    };
+    std::map<uint64_t, graph_bucket> gf_res_buckets;
+    uint64_t active_bucket_key = 0;
+
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;
 

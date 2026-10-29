@@ -726,7 +726,7 @@ static ServerConfig parse_server_args(int argc, char** argv, os::ExplicitFlags& 
         else if (arg == "-ts" || arg == "--tensor-split") cfg.backend.tensor_split_str = next_str("-ts/--tensor-split");
         else if (arg == "--main-gpu") cfg.backend.main_gpu = next_int("--main-gpu");
         else if (arg == "--speculative" || arg == "--speculative-mode") {
-            cfg.default_params.speculative_mode = true;
+            (void)0;
         }
         else if (arg == "-n" || arg == "--n-predict") cfg.default_params.n_predict = next_int("-n/--n-predict");
         else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
@@ -928,7 +928,7 @@ static GenParams parse_request_params(const json& body, const GenParams& default
 
         if (diff.contains("block_size")) params.block_size = diff["block_size"].get<int>();
         if (diff.contains("diffusion_steps")) params.diffusion_steps = diff["diffusion_steps"].get<int>();
-        if (diff.contains("speculative_mode")) params.speculative_mode = diff["speculative_mode"].get<bool>();
+        if (diff.contains("diffusion_steps")) params.diffusion_steps = diff["diffusion_steps"].get<int>();
         if (diff.contains("whole_max")) params.whole_max = diff["whole_max"].get<int>();
         if (diff.contains("max_iters")) params.max_iters = diff["max_iters"].get<int>();
         if (diff.contains("init")) {

@@ -74,7 +74,7 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = config.n_ctx;
-    cparams.n_rs_seq = 0; // Pure decoding / non-speculative: eliminate recurrent rollback slots
+    cparams.n_rs_seq = 0;
     cparams.n_batch = config.n_batch;
     cparams.n_ubatch = config.n_ubatch;
     int32_t threads = config.n_threads > 0 ? config.n_threads : std::max(1u, std::thread::hardware_concurrency() / 2);
@@ -238,7 +238,9 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
     }
 
     if (want_all) {
-        // llama_get_logits returns contiguous float array [n_outputs * n_vocab]
+        if (llama_get_sampled_token_ith(ctx_, 0) >= 0) {
+            return LogitsView{nullptr, n_vocab_, n};
+        }
         const float* logits = llama_get_logits(ctx_);
         if (!logits) {
             throw std::runtime_error("Failed to get output logits");
@@ -247,7 +249,6 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
     } else {
         last_sampled_token_ = llama_get_sampled_token_ith(ctx_, -1);
         if (last_sampled_token_ >= 0) {
-            // Backend sampling active: GPU sampled token directly, raw logits DtoH skipped
             return LogitsView{nullptr, n_vocab_, 1};
         }
         const float* row = llama_get_logits_ith(ctx_, -1);
@@ -311,6 +312,9 @@ LogitsView BackendLlama::eval_custom_pos(const int32_t* toks, int n, const int32
         throw std::runtime_error("llama_decode failed during eval_custom_pos");
     }
 
+    if (llama_get_sampled_token_ith(ctx_, 0) >= 0) {
+        return LogitsView{nullptr, n_vocab_, want_all ? n : 1};
+    }
     const float* logits = llama_get_logits(ctx_);
     return LogitsView{logits, n_vocab_, want_all ? n : 1};
 }
@@ -321,15 +325,12 @@ const float* BackendLlama::get_logits_ith(int32_t i) const {
 }
 
 bool BackendLlama::set_sampler(int32_t seq_id, void* sampler) {
-    (void)seq_id;
-    (void)sampler;
-    return false;
+    if (!ctx_) return false;
+    last_sampled_token_ = -1;
+    return llama_set_sampler(ctx_, seq_id, static_cast<llama_sampler*>(sampler));
 }
 
 int32_t BackendLlama::get_sampled_token(int32_t idx) const {
-    if (last_sampled_token_ >= 0 && (idx == -1 || idx == 0)) {
-        return last_sampled_token_;
-    }
     if (!ctx_) return -1;
     return llama_get_sampled_token_ith(ctx_, idx);
 }
@@ -365,7 +366,6 @@ void BackendLlama::kv_cp(int32_t src_seq, int32_t dst_seq, int32_t p0, int32_t p
 bool BackendLlama::apply_lora_adapters(const std::vector<std::pair<std::string, float>>& adapters) {
     if (!model_ || !ctx_) return false;
 
-    // Load any adapter not yet loaded
     for (const auto& ad : adapters) {
         bool found = false;
         for (const auto& loaded : loaded_adapters_) {
@@ -450,7 +450,6 @@ std::vector<float> BackendLlama::get_embeddings_seq(int32_t seq_id) const {
         return {};
     }
     std::vector<float> res(embd, embd + n_embd_);
-    // L2 normalize
     double sum = 0.0;
     for (float v : res) sum += static_cast<double>(v) * v;
     if (sum > 0.0) {

@@ -1,7 +1,23 @@
 #include "init_guess.h"
 #include <algorithm>
+#include <cctype>
 
 namespace diffusion {
+
+static uint64_t hash_stem_piece(std::string_view piece, int& out_len) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    int len = 0;
+    for (unsigned char c : piece) {
+        if (std::isalnum(c)) {
+            unsigned char lc = static_cast<unsigned char>(std::tolower(c));
+            h ^= static_cast<uint64_t>(lc);
+            h *= 0x100000001b3ULL;
+            len++;
+        }
+    }
+    out_len = len;
+    return h;
+}
 
 NgramPool::NgramPool(int n, int max_entries)
     : n_(std::max(2, n)), max_entries_(std::max(64, max_entries)) {}
@@ -39,13 +55,13 @@ int32_t NgramPool::predict(const std::vector<int32_t>& context, int32_t fallback
     if (context.empty()) return fallback;
 
     int ctx_len = static_cast<int>(context.size());
-    for (int order = std::min(8, n_); order >= 2; --order) {
+    for (int order = std::min(8, n_); order >= 3; --order) {
         int prefix_len = order - 1;
         if (ctx_len >= prefix_len) {
             const int32_t* ptr = context.data() + (ctx_len - prefix_len);
             uint64_t h = hash_prefix(ptr, prefix_len);
             auto it = table_.find(h);
-            if (it != table_.end() && it->second.best_tok >= 0) {
+            if (it != table_.end() && it->second.best_tok >= 0 && (order >= 5 || (order == 4 && it->second.best_count >= 2))) {
                 return it->second.best_tok;
             }
         }
@@ -59,26 +75,30 @@ InitGuesser::InitGuesser(
     int32_t n_vocab,
     uint32_t seed,
     int32_t ngram_n,
-    int32_t ngram_pool_max,
-    IModelBackend* draft_backend,
-    ISamplerChain* draft_sampler
+    int32_t ngram_pool_max
 ) : strategy_(strategy),
     tokenizer_(tokenizer),
     n_vocab_(n_vocab),
     rng_(seed),
     ngram_pool_(std::max(4, ngram_n), ngram_pool_max),
-    context_trie_(12),
-    draft_backend_(draft_backend),
-    draft_sampler_(draft_sampler) {}
+    context_trie_(12) {}
 
 void InitGuesser::update_ngram(const std::vector<int32_t>& tokens) {
     if (tokens.empty()) return;
+    size_t old_size = context_trie_.full_history().size();
     context_trie_.update(tokens);
     const auto& hist = context_trie_.full_history();
     if (hist.size() >= 2) {
-        size_t lookback = std::min(hist.size(), tokens.size() + 8);
-        std::vector<int32_t> slice(hist.end() - lookback, hist.end());
+        size_t start_idx = (old_size >= 7) ? (old_size - 7) : 0;
+        std::vector<int32_t> slice(hist.begin() + start_idx, hist.end());
         ngram_pool_.train(slice);
+        for (size_t i = (old_size > 0 ? old_size - 1 : 0); i + 1 < hist.size(); ++i) {
+            int stem_len = 0;
+            uint64_t sh = hash_stem_piece(tokenizer_.piece(hist[i]), stem_len);
+            if (stem_len >= 5 && !tokenizer_.is_eog(hist[i + 1])) {
+                stem_next_[sh] = hist[i + 1];
+            }
+        }
     }
 }
 
@@ -89,88 +109,24 @@ std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int3
 
     int32_t fallback_pad = tokenizer_.pad_or_fallback();
 
-    // Strategy: DRAFT model speculative generation
-    if (strategy_ == InitStrategy::DRAFT && draft_backend_ && draft_sampler_ && !context.empty()) {
-        try {
-            draft_backend_->kv_clear();
-            int ctx_len = static_cast<int>(context.size());
-            LogitsView dlogits = draft_backend_->eval(context.data(), ctx_len, 0, false);
-            auto dsampler = draft_sampler_->clone();
-            for (int32_t tok : context) {
-                dsampler->accept(tok);
-            }
-
-            int pos = ctx_len;
-            for (int i = 0; i < count; ++i) {
-                float prob = 0.0f;
-                int32_t tok = dsampler->sample(dlogits.row(0), pos, &prob);
-                if (tokenizer_.is_eog(tok)) break;
-                guesses.push_back(tok);
-                dsampler->accept(tok);
-                pos++;
-                if (i + 1 < count) {
-                    dlogits = draft_backend_->eval(&tok, 1, pos - 1, false);
-                }
-            }
-            if (static_cast<int>(guesses.size()) >= count) {
-                return guesses;
-            }
-        } catch (...) {
-            // Fallback gracefully on draft eval error
-        }
-    }
-
-    // In NGRAM or ADAPTIVE_ENTROPY mode (native self-diffusion), match high-confidence chained phrases
     if ((strategy_ == InitStrategy::NGRAM || strategy_ == InitStrategy::ADAPTIVE_ENTROPY) && !context.empty()) {
-        // 1. High-confidence chained phrase match from ContextTrie (order down to 2)
-        auto phrase = context_trie_.chain_match(context, count, 2);
+        // 1. High-confidence multi-token phrase match from ContextTrie (require order >= 3)
+        int max_take = std::min(count, 4);
+        auto phrase = context_trie_.chain_match(context, max_take, 4);
         for (int32_t tok : phrase) {
             if (tokenizer_.is_eog(tok)) break;
             guesses.push_back(tok);
-            if (static_cast<int>(guesses.size()) >= count) break;
+            if (static_cast<int>(guesses.size()) >= max_take) break;
         }
 
-        // 2. Iterative N-gram prediction from learned pool (order >= 2)
-        if (static_cast<int>(guesses.size()) < count) {
-            std::vector<int32_t> running_ctx = context;
-            running_ctx.insert(running_ctx.end(), guesses.begin(), guesses.end());
-            while (static_cast<int>(guesses.size()) < count) {
-                int32_t pred = ngram_pool_.predict(running_ctx, -1);
-                if (pred < 0 || tokenizer_.is_eog(pred)) {
-                    break;
-                }
+        // 2. N-gram pool match (order >= 4, or order == 3 with count >= 2)
+        if (guesses.empty()) {
+            int32_t pred = ngram_pool_.predict(context, -1);
+            if (pred >= 0 && !tokenizer_.is_eog(pred)) {
                 guesses.push_back(pred);
-                running_ctx.push_back(pred);
             }
         }
 
-        // 3. Fallback backoff continuation from parent syntactic context
-        if (static_cast<int>(guesses.size()) < count && context.size() >= 2) {
-            std::vector<int32_t> backoff_ctx(context.end() - 2, context.end() - 1);
-            auto backoff_phrase = context_trie_.chain_match(backoff_ctx, count - static_cast<int>(guesses.size()), 1);
-            for (int32_t tok : backoff_phrase) {
-                if (tokenizer_.is_eog(tok)) break;
-                guesses.push_back(tok);
-                if (static_cast<int>(guesses.size()) >= count) break;
-            }
-        }
-
-        // 4. Keep batch size strictly static: pad open slots so CUDA graph warmup never resets
-        int needed = count - static_cast<int>(guesses.size());
-        if (needed > 0) {
-            int32_t pad_tok = fallback_pad;
-            if (!guesses.empty()) {
-                pad_tok = guesses.back();
-            } else if (!context.empty()) {
-                int32_t pred = ngram_pool_.predict(context, -1);
-                if (pred >= 0 && !tokenizer_.is_eog(pred)) {
-                    pad_tok = pred;
-                }
-            }
-            for (int i = 0; i < needed; ++i) {
-                guesses.push_back(pad_tok);
-            }
-        }
         return guesses;
     }
 

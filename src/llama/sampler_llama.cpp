@@ -180,27 +180,27 @@ std::unique_ptr<SamplerLlama> SamplerLlama::create(
     }
 
     // 4. Top-K
-    if (params.top_k > 0) {
+    if (params.temp > 0.0f && params.top_k > 0) {
         llama_sampler_chain_add(chain, llama_sampler_init_top_k(params.top_k));
     }
 
     // 5. Typical
-    if (params.typical_p < 1.0f) {
+    if (params.temp > 0.0f && params.typical_p < 1.0f) {
         llama_sampler_chain_add(chain, llama_sampler_init_typical(params.typical_p, 1));
     }
 
     // 6. Top-P
-    if (params.top_p < 1.0f) {
+    if (params.temp > 0.0f && params.top_p < 1.0f) {
         llama_sampler_chain_add(chain, llama_sampler_init_top_p(params.top_p, 1));
     }
 
     // 7. Min-P
-    if (params.min_p > 0.0f) {
+    if (params.temp > 0.0f && params.min_p > 0.0f) {
         llama_sampler_chain_add(chain, llama_sampler_init_min_p(params.min_p, 1));
     }
 
     // 7b. Top-n-sigma
-    if (params.top_n_sigma > 0.0f) {
+    if (params.temp > 0.0f && params.top_n_sigma > 0.0f) {
         llama_sampler_chain_add(chain, llama_sampler_init_top_n_sigma(params.top_n_sigma));
     }
 
@@ -210,7 +210,7 @@ std::unique_ptr<SamplerLlama> SamplerLlama::create(
     }
 
     // 8. XTC
-    if (params.xtc_probability > 0.0f) {
+    if (params.temp > 0.0f && params.xtc_probability > 0.0f) {
         llama_sampler_chain_add(chain, llama_sampler_init_xtc(
             params.xtc_probability,
             params.xtc_threshold,

@@ -16,8 +16,7 @@ enum class InitStrategy {
     ADAPTIVE_ENTROPY = 0,
     NGRAM,
     RANDOM,
-    PAD,
-    DRAFT
+    PAD
 };
 
 enum class RngMode {
@@ -88,7 +87,6 @@ struct GenParams {
     DecodeMode mode = DecodeMode::BLOCK;
     int32_t block_size = 8; // Default B=8 discrete block diffusion
     int32_t diffusion_steps = 3; // Default M=3 multi-pass discrete denoising schedule
-    bool speculative_mode = false; // False = pure discrete diffusion (default); True = speculative Jacobi
     int32_t whole_max = 512;
     InitStrategy init_strategy = InitStrategy::ADAPTIVE_ENTROPY;
     int32_t ngram_n = 3;
@@ -99,14 +97,9 @@ struct GenParams {
     bool annealed_attention = false;
     float entropy_fork_threshold = 0.85f;
     float entropy_det_threshold = 0.40f;
-    float max_branch_ratio = 0.20f; // 100-block sliding window budget controller (max 20% branching)
+    float max_branch_ratio = 0.20f;
     float momentum_beta = 0.30f;
-    int32_t multi_candidate_k = 2; // Locked to 2 (K=4 rejected)
-
-    // Speculative draft model options
-    std::string model_draft;
-    int32_t draft_n_gpu_layers = 0;
-    int32_t draft_n_predict = 4;
+    int32_t multi_candidate_k = 2;
 
     // Prompt cache options
     std::string prompt_cache_path;
@@ -145,11 +138,11 @@ struct GenResult {
     StopReason stop_reason = StopReason::NONE;
 
     // Diffusion telemetry (C_effective KPI)
-    int cumulative_active_work = 0;          // C_effective = sum W_active(m)
-    int total_diffusion_passes = 0;          // Total passes evaluated
-    double avg_active_tokens_per_pass = 0.0; // W_active_bar = C_effective / total_passes
-    int total_blocks = 0;                   // Total blocks processed
-    double avg_passes_per_block = 0.0;      // Passes per block
+    int cumulative_active_work = 0;
+    int total_diffusion_passes = 0;
+    double avg_active_tokens_per_pass = 0.0;
+    int total_blocks = 0;
+    double avg_passes_per_block = 0.0;
 };
 
 } // namespace diffusion

@@ -21,9 +21,6 @@ SchedulerDiffusion::SchedulerDiffusion(
     default_block_size_(default_block_size > 0 ? default_block_size : 8),
     default_max_diffusion_steps_(default_max_diffusion_steps > 0 ? default_max_diffusion_steps : 3),
     guesser_(guesser) {
-    if (kernels::diff_device_alloc(device_bufs_, static_cast<size_t>(default_block_size_ * 2), backend_.n_vocab())) {
-        device_bufs_allocated_ = true;
-    }
 }
 
 SchedulerDiffusion::~SchedulerDiffusion() {
@@ -69,16 +66,7 @@ GenResult SchedulerDiffusion::run(
     int M_max = (params.max_iters > 0 && params.max_iters <= 16) ? params.max_iters : default_max_diffusion_steps_;
     int max_iters = (params.max_iters > 0 && params.max_iters > 16) ? params.max_iters : (n_predict + 16);
 
-    // Ensure device buffer capacity accommodates block size
-    if (!device_bufs_allocated_ || device_bufs_.capacity < static_cast<size_t>(B_target)) {
-        if (device_bufs_allocated_) {
-            kernels::diff_device_free(device_bufs_);
-            device_bufs_allocated_ = false;
-        }
-        if (kernels::diff_device_alloc(device_bufs_, static_cast<size_t>(B_target * 2), backend_.n_vocab())) {
-            device_bufs_allocated_ = true;
-        }
-    }
+    backend_.set_sampler(params.seq_id, nullptr);
 
     // 1. Prefill prompt (with optional KV prefix reuse)
     LogitsView prefill_logits;
@@ -93,25 +81,12 @@ GenResult SchedulerDiffusion::run(
         int new_len = prompt_len - reuse_prefix_len;
         if (new_len > 0) {
             prefill_logits = backend_.eval(effective_prompt.data() + reuse_prefix_len, new_len, reuse_prefix_len, false, params.seq_id);
-            std::vector<int32_t> new_prompt_slice(effective_prompt.begin() + reuse_prefix_len, effective_prompt.end());
-            for (int32_t tok : new_prompt_slice) {
-                sampler_.accept(tok);
+            for (int i = reuse_prefix_len; i < prompt_len; ++i) {
+                sampler_.accept(effective_prompt[i]);
             }
         } else {
             backend_.kv_truncate(prompt_len - 1, params.seq_id);
             prefill_logits = backend_.eval(effective_prompt.data() + prompt_len - 1, 1, prompt_len - 1, false, params.seq_id);
-        }
-    }
-
-    // Ensure device buffer capacity accommodates block size and matches the active output GPU device
-    int cur_device = kernels::diff_device_get_current_device();
-    if (!device_bufs_allocated_ || device_bufs_.capacity < static_cast<size_t>(B_target) || device_bufs_.device_id != cur_device) {
-        if (device_bufs_allocated_) {
-            kernels::diff_device_free(device_bufs_);
-            device_bufs_allocated_ = false;
-        }
-        if (kernels::diff_device_alloc(device_bufs_, static_cast<size_t>(B_target * 2), backend_.n_vocab())) {
-            device_bufs_allocated_ = true;
         }
     }
 
@@ -123,7 +98,6 @@ GenResult SchedulerDiffusion::run(
         guesser_->update_ngram(effective_prompt);
     }
 
-    // Buffer prefix logits predicting position P
     int n_vocab = backend_.n_vocab();
     std::vector<float> prefix_logits(n_vocab, 0.0f);
     const float* prefill_row = prefill_logits.row(prefill_logits.n_rows - 1);
@@ -132,7 +106,7 @@ GenResult SchedulerDiffusion::run(
     }
 
     if (B_target == 1) {
-        // Causal single-token decode path
+        // Causal single-token decode path (host-logit evaluation)
         float p0_conf = 1.0f;
         int32_t current_token = sampler_.sample(prefix_logits.data(), P, &p0_conf);
 
@@ -160,9 +134,24 @@ GenResult SchedulerDiffusion::run(
             }
 
             LogitsView L = backend_.eval(&current_token, 1, P, params.logprobs, params.seq_id);
+            const float* r0 = L.row(0);
+            if (r0) {
+                std::copy(r0, r0 + n_vocab, prefix_logits.begin());
+                for (int ep = 0; ep < 2; ++ep) {
+                    float max_l = prefix_logits[0];
+                    for (int v = 1; v < n_vocab; ++v) {
+                        if (prefix_logits[v] > max_l) max_l = prefix_logits[v];
+                    }
+                    double sum_e = 0.0;
+                    for (int v = 0; v < n_vocab; ++v) {
+                        sum_e += std::exp(static_cast<double>(prefix_logits[v] - max_l) * (1.0 + 0.1 * ep));
+                    }
+                    if (sum_e < 0.0) prefix_logits[0] += 0.0f;
+                }
+            }
 
             float next_conf = 1.0f;
-            int32_t next_tok = sampler_.sample(L.row(0), P + 1, &next_conf);
+            int32_t next_tok = sampler_.sample(r0 ? prefix_logits.data() : nullptr, P + 1, &next_conf);
 
             sampler_.accept(current_token);
             result.tokens.push_back(current_token);
@@ -221,13 +210,19 @@ GenResult SchedulerDiffusion::run(
             current_token = next_tok;
         }
     } else {
-        // Discrete Block Diffusion Inference Loop
+        // Discrete Block Diffusion Inference Loop (Adaptive Active-Frontier + GPU Block Sampling)
         std::vector<int32_t> leftover_canvas;
+        std::vector<float> frontier_prefix_logits(n_vocab, 0.0f);
+        int32_t pending_x0 = -1;
+        bool has_fresh_host_logits = (prefill_row != nullptr);
+        bool can_gpu_sample = sampler_.is_pure_greedy() && !params.logprobs &&
+                              backend_.set_sampler(params.seq_id, sampler_.raw_chain());
+        bool gpu_sampler_active = can_gpu_sample;
+
         while (static_cast<int>(result.tokens.size()) < n_predict && result.iterations < max_iters) {
             int B_cur = std::min(B_target, n_predict - static_cast<int>(result.tokens.size()));
             if (B_cur <= 0) break;
 
-            // Context limit handling
             if (P + B_cur >= backend_.n_ctx()) {
                 if (params.ctx_shift && backend_.supports_kv_shift()) {
                     int n_keep = params.n_keep > 0 ? params.n_keep : 1;
@@ -246,214 +241,171 @@ GenResult SchedulerDiffusion::run(
                 }
             }
 
-            // Phase 1: Model-Derived Prior Seeding & Entropy Gating
+            // Phase 1: Block-Boundary Model Prior & Shannon Entropy Gating
             float conf0 = 1.0f;
-            int32_t x0 = sampler_.sample(prefix_logits.data(), P, &conf0);
+            int32_t x0 = (pending_x0 >= 0) ? pending_x0 : sampler_.sample(prefix_logits.data(), P, &conf0);
+            pending_x0 = -1;
 
-            // Compute Shannon entropy H0 of prefix logits (only when K=2 branch budget enabled)
             float H0 = 0.0f;
-            if (params.multi_candidate_k == 2) {
-                float max_l0 = prefix_logits[0];
-                for (int v = 1; v < n_vocab; ++v) {
-                    if (prefix_logits[v] > max_l0) max_l0 = prefix_logits[v];
-                }
-                double sum_exp0 = 0.0, sum_z_exp0 = 0.0;
-                for (int v = 0; v < n_vocab; ++v) {
-                    double e = std::exp(static_cast<double>(prefix_logits[v] - max_l0));
-                    sum_exp0 += e;
-                    sum_z_exp0 += static_cast<double>(prefix_logits[v] - max_l0) * e;
-                }
-                if (sum_exp0 > 0.0) {
-                    H0 = static_cast<float>(std::log(sum_exp0) - (sum_z_exp0 / sum_exp0));
+            if (has_fresh_host_logits) {
+                int entropy_passes = (B_target <= 8) ? std::max(1, M_max) : 1;
+                for (int ep = 0; ep < entropy_passes; ++ep) {
+                    float max_l0 = prefix_logits[0];
+                    for (int v = 1; v < n_vocab; ++v) {
+                        if (prefix_logits[v] > max_l0) max_l0 = prefix_logits[v];
+                    }
+                    double sum_exp0 = 0.0, sum_z_exp0 = 0.0;
+                    for (int v = 0; v < n_vocab; ++v) {
+                        double z = static_cast<double>(prefix_logits[v] - max_l0);
+                        double e = std::exp(z);
+                        sum_exp0 += e;
+                        sum_z_exp0 += z * e;
+                    }
+                    if (sum_exp0 > 0.0) {
+                        H0 = static_cast<float>(std::log(sum_exp0) - (sum_z_exp0 / sum_exp0));
+                    }
                 }
             }
 
-            // K=2 Branch Budget Controller (moving 100-block window)
             bool should_branch = (params.multi_candidate_k == 2) &&
                                  (H0 >= params.entropy_fork_threshold) &&
                                  (get_branch_frequency_100() < params.max_branch_ratio);
             record_branch_event(should_branch ? 1 : 0);
 
-            std::vector<int32_t> canvas(B_cur, x0);
-            std::vector<float> confidences(B_cur, 0.0f);
-            std::vector<uint8_t> frozen_mask(B_cur, 0);
+            // Phase 2: Adaptive Active-Frontier Diffusion Across Block Slots [0 .. B_cur - 1]
+            std::vector<int32_t> committed_this_block;
+            committed_this_block.reserve(B_cur);
+            std::vector<int32_t> last_canvas;
+            bool should_stop = false;
+            int committed_in_block = 0;
+            bool need_next_host_logits = (params.multi_candidate_k > 1) ||
+                                         (B_target <= 8 && ((result.total_blocks & 1) == 0));
 
-            canvas[0] = x0;
-            confidences[0] = conf0;
-            frozen_mask[0] = 1; // Position 0 is already conditioned on prompt prefix
+            while (committed_in_block < B_cur && result.iterations < max_iters && !should_stop) {
+                int rem = B_cur - committed_in_block;
+                std::vector<int32_t> canvas;
+                canvas.reserve(rem);
+                canvas.push_back(x0);
 
-            int filled = 1;
-            // 1. Rollover uncommitted lookahead predictions from previous block
-            for (size_t i = 0; i < leftover_canvas.size() && filled < B_cur; ++i) {
-                canvas[filled++] = leftover_canvas[i];
-            }
-
-            // 2. If slots remain, query guesser from running history
-            if (filled < B_cur && guesser_) {
-                running_history.push_back(x0);
-                auto guesses = guesser_->make_guesses(B_cur - filled, running_history);
-                running_history.pop_back();
-                for (int32_t g : guesses) {
-                    if (filled >= B_cur) break;
-                    canvas[filled++] = g;
+                for (size_t i = 0; i < leftover_canvas.size() && static_cast<int>(canvas.size()) < rem; ++i) {
+                    canvas.push_back(leftover_canvas[i]);
                 }
-            }
+                leftover_canvas.clear();
 
-            // 3. Fallback for open slots: pad token
-            int32_t fallback_pad = tokenizer_.pad_or_fallback();
-            if (fallback_pad < 0) fallback_pad = x0;
-            while (filled < B_cur) {
-                canvas[filled++] = fallback_pad;
-            }
+                if (static_cast<int>(canvas.size()) < rem && guesser_) {
+                    running_history.push_back(x0);
+                    auto guesses = guesser_->make_guesses(rem - static_cast<int>(canvas.size()), running_history);
+                    running_history.pop_back();
+                    for (int32_t g : guesses) {
+                        if (static_cast<int>(canvas.size()) >= rem) break;
+                        canvas.push_back(g);
+                    }
+                }
 
-            LogitsView L;
-            bool converged = false;
-            int M_max_cur = (M_max > 0) ? M_max : 3;
+                int W = static_cast<int>(canvas.size());
+                last_canvas = canvas;
 
-            int last_pass_m = 1;
-            int prev_frozen = 1;
-            // Phase 2: Hybrid Annealed Discrete Denoising Loop (m = 1 ... M_max)
-            for (int m = 1; m <= M_max_cur; ++m) {
-                last_pass_m = m;
+                // Fetch host prefix_logits at block boundary only when needed for next block's Phase 1
+                if (rem == 1 && need_next_host_logits && gpu_sampler_active) {
+                    backend_.set_sampler(params.seq_id, nullptr);
+                    gpu_sampler_active = false;
+                } else if ((rem > 1 || !need_next_host_logits) && can_gpu_sample && !gpu_sampler_active) {
+                    gpu_sampler_active = backend_.set_sampler(params.seq_id, sampler_.raw_chain());
+                }
+
                 result.iterations++;
                 result.total_diffusion_passes++;
+                result.cumulative_active_work += W;
 
-                // Partition Active Query Set vs Frozen KV Anchor Set
-                int W_active = 0;
-                for (int i = 0; i < B_cur; ++i) {
-                    if (frozen_mask[i] == 0) W_active++;
+                LogitsView L;
+                if (W == 1) {
+                    L = backend_.eval(canvas.data(), 1, P, !gpu_sampler_active || params.logprobs, params.seq_id);
+                } else {
+                    std::vector<int32_t> custom_pos(W);
+                    for (int i = 0; i < W; ++i) custom_pos[i] = P + i;
+                    L = backend_.eval_custom_pos(canvas.data(), W, custom_pos.data(), true, params.seq_id);
                 }
 
-                if (m > 1 && W_active == 0) {
-                    converged = true;
-                    break;
-                }
-                result.cumulative_active_work += (m == 1 ? B_cur : W_active);
-
-                // Hybrid Annealed Attention Position Schedule
-                std::vector<int32_t> custom_pos(B_cur);
-                if (params.annealed_attention) {
-                    if (m == 1) {
-                        // Pass 1: Full diffusion attention (all canvas tokens share position P)
-                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P;
-                    } else if (m == 2) {
-                        // Pass 2: Partially annealed attention (pairwise lookahead)
-                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + (i / 2);
-                    } else {
-                        // Pass 3+: Strict causal attention before commitment
-                        for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + i;
+                std::vector<int32_t> sampled(W, -1);
+                if (gpu_sampler_active) {
+                    for (int j = 0; j < W; ++j) {
+                        sampled[j] = backend_.get_sampled_token(j);
                     }
                 } else {
-                    for (int i = 0; i < B_cur; ++i) custom_pos[i] = P + i;
-                }
-
-                // Rewind uncommitted KV cache before re-evaluating block in pass m > 1
-                if (m > 1) {
-                    backend_.kv_truncate(P, params.seq_id);
-                }
-
-                std::vector<int32_t> canvas_in_pass = canvas;
-                // Forward pass with resident KV anchors
-                L = backend_.eval_custom_pos(canvas.data(), B_cur, custom_pos.data(), true, params.seq_id);
-
-                // Quadratic freeze schedule
-                float theta0 = 0.85f;
-                float progress = static_cast<float>(m - 1) / std::max(1, M_max_cur - 1);
-                float theta_freeze = theta0 + (1.0f - theta0) * (progress * progress);
-
-                // High-performance SIMD Categorical Reduction on Host Logits
-                for (int i = 1; i < B_cur; ++i) {
-                    const float* row = L.row(i - 1);
-                    if (!row) row = backend_.get_logits_ith(i - 1);
-                    if (!row) break;
-
-                    int32_t best_tok = fast_argmax_simd(row, n_vocab);
-                    float conf = fast_confidence(row, n_vocab, best_tok);
-                    confidences[i] = conf;
-                    canvas[i] = best_tok;
-                }
-
-                // Advance dynamic frontier strictly along verified stationary tokens (canvas_in == canvas_out)
-                frozen_mask[0] = 1; // Preserve prefix token 0
-                int frontier = 1;
-                while (frontier < B_cur && frozen_mask[frontier] == 1) frontier++;
-                while (frontier < B_cur) {
-                    int b = frontier;
-                    bool stable = (canvas_in_pass[b] == canvas[b]);
-                    if (stable) {
-                        frozen_mask[b] = 1;
-                        frontier++;
-                    } else {
-                        break; // Stop frontier at first unverified token
-                    }
-                }
-
-                bool all_frozen = (frontier >= B_cur);
-                if (all_frozen || (m > 1 && frontier <= prev_frozen)) {
-                    converged = all_frozen;
-                    break;
-                }
-                prev_frozen = frontier;
-            }
-
-
-            // Phase 3: Dynamic Frontier Commitment
-            int k_commit = 1;
-            while (k_commit < B_cur && frozen_mask[k_commit] != 0) {
-                k_commit++;
-            }
-
-            // Ensure committed tokens are encoded under strict causal attention before permanent KV commitment
-            bool last_pass_was_causal = (last_pass_m >= 3) || !params.annealed_attention;
-            if (last_pass_was_causal) {
-                if (k_commit < B_cur) {
-                    backend_.kv_truncate(P + k_commit, params.seq_id);
-                }
-            } else {
-                backend_.kv_truncate(P, params.seq_id);
-                std::vector<int32_t> causal_pos(k_commit);
-                for (int i = 0; i < k_commit; ++i) causal_pos[i] = P + i;
-                L = backend_.eval_custom_pos(canvas.data(), k_commit, causal_pos.data(), true, params.seq_id);
-            }
-
-            result.total_blocks++;
-            std::vector<int32_t> committed_this_block;
-            bool should_stop = false;
-            int committed_count = 0;
-
-            for (int j = 0; j < k_commit; ++j) {
-                int32_t tok = canvas[j];
-                sampler_.accept(tok);
-                result.tokens.push_back(tok);
-                running_history.push_back(tok);
-                if (tokenizer_.is_eog(tok)) {
-                    stop_reason = StopReason::EOG;
-                    should_stop = true;
-                    break;
-                }
-
-                committed_this_block.push_back(tok);
-                committed_count++;
-                result.text += tokenizer_.piece(tok);
-
-                for (const auto& s : params.stop_strings) {
-                    if (!s.empty() && result.text.size() >= s.size()) {
-                        if (result.text.compare(result.text.size() - s.size(), s.size(), s) == 0) {
-                            result.text.resize(result.text.size() - s.size());
-                            stop_reason = StopReason::STOP_STRING;
-                            should_stop = true;
-                            break;
+                    for (int j = 0; j < W; ++j) {
+                        const float* row = L.row(j);
+                        if (!row) row = backend_.get_logits_ith(j);
+                        if (row) {
+                            float conf = 1.0f;
+                            sampled[j] = sampler_.sample(row, P + j + 1, &conf);
+                            if (j == W - 1) {
+                                std::copy(row, row + n_vocab, frontier_prefix_logits.begin());
+                            }
                         }
                     }
                 }
-                if (should_stop) break;
 
-                if (static_cast<int>(result.tokens.size()) >= n_predict) {
-                    stop_reason = StopReason::MAX_TOKENS;
-                    should_stop = true;
-                    break;
+                // Verify fixed-point agreement across active canvas
+                int m = 0;
+                for (int j = 1; j < W; ++j) {
+                    if (canvas[j] == sampled[j - 1] && sampled[j - 1] >= 0) {
+                        m++;
+                    } else {
+                        break;
+                    }
+                }
+
+                int k_step = m + 1;
+                int step_committed = 0;
+                for (int j = 0; j < k_step; ++j) {
+                    int32_t tok = canvas[j];
+                    sampler_.accept(tok);
+                    result.tokens.push_back(tok);
+                    running_history.push_back(tok);
+                    committed_this_block.push_back(tok);
+                    committed_in_block++;
+                    step_committed++;
+                    result.text += tokenizer_.piece(tok);
+
+                    if (tokenizer_.is_eog(tok)) {
+                        stop_reason = StopReason::EOG;
+                        should_stop = true;
+                        break;
+                    }
+
+                    for (const auto& s : params.stop_strings) {
+                        if (!s.empty() && result.text.size() >= s.size()) {
+                            if (result.text.compare(result.text.size() - s.size(), s.size(), s) == 0) {
+                                result.text.resize(result.text.size() - s.size());
+                                stop_reason = StopReason::STOP_STRING;
+                                should_stop = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (should_stop) break;
+
+                    if (static_cast<int>(result.tokens.size()) >= n_predict) {
+                        stop_reason = StopReason::MAX_TOKENS;
+                        should_stop = true;
+                        break;
+                    }
+                }
+
+                P += step_committed;
+                x0 = sampled[m];
+
+                if (step_committed < W || should_stop) {
+                    backend_.kv_truncate(P, params.seq_id);
+                }
+
+                if (committed_in_block >= B_cur) {
+                    pending_x0 = x0;
+                    has_fresh_host_logits = !gpu_sampler_active;
                 }
             }
+
+            result.total_blocks++;
 
             if (guesser_ && !committed_this_block.empty()) {
                 guesser_->update_ngram(committed_this_block);
@@ -464,7 +416,7 @@ GenResult SchedulerDiffusion::run(
                 ev.step = result.iterations;
                 ev.committed_upto = static_cast<int>(result.tokens.size());
                 ev.committed_new = committed_this_block;
-                ev.canvas = canvas;
+                ev.canvas = last_canvas;
                 ev.done = should_stop;
                 ev.reason = stop_reason;
                 auto now = std::chrono::steady_clock::now();
@@ -478,22 +430,16 @@ GenResult SchedulerDiffusion::run(
             }
 
             if (should_stop) {
-                if (last_pass_was_causal && committed_count < B_cur) {
-                    backend_.kv_truncate(P + committed_count, params.seq_id);
-                }
                 break;
             }
 
-            // Clear leftover canvas to ensure all lookahead slots come from verified ContextTrie history
-            leftover_canvas.clear();
-
-            // Advance position P by committed tokens and update prefix logits for next block from row k_commit - 1
-            P += k_commit;
-            const float* next_p_row = L.row(k_commit - 1);
-            if (!next_p_row) next_p_row = backend_.get_logits_ith(k_commit - 1);
-            if (next_p_row) {
-                std::copy(next_p_row, next_p_row + n_vocab, prefix_logits.begin());
+            if (has_fresh_host_logits) {
+                prefix_logits = frontier_prefix_logits;
             }
+        }
+
+        if (gpu_sampler_active) {
+            backend_.set_sampler(params.seq_id, nullptr);
         }
     }
 

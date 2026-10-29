@@ -29,7 +29,7 @@ int main() {
     cfg.n_ctx = 2048;
     cfg.flash_attn = true;
     cfg.swa_full = true;
-    cfg.split_mode = 1;
+    cfg.split_mode = 0;
 
     std::unique_ptr<BackendLlama> backend;
     try {

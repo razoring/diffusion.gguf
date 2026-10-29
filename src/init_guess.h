@@ -42,9 +42,7 @@ public:
         int32_t n_vocab,
         uint32_t seed,
         int32_t ngram_n = 3,
-        int32_t ngram_pool_max = 4096,
-        IModelBackend* draft_backend = nullptr,
-        ISamplerChain* draft_sampler = nullptr
+        int32_t ngram_pool_max = 4096
     );
 
     std::vector<int32_t> make_guesses(
@@ -61,8 +59,7 @@ private:
     std::mt19937 rng_;
     NgramPool ngram_pool_;
     ContextTrie context_trie_;
-    IModelBackend* draft_backend_ = nullptr;
-    ISamplerChain* draft_sampler_ = nullptr;
+    std::unordered_map<uint64_t, int32_t> stem_next_;
 };
 
 } // namespace diffusion

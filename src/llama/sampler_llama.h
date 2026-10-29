@@ -20,7 +20,7 @@ public:
 
     void* raw_chain() const override { return chain_; }
     llama_sampler* llama_chain() const { return chain_; }
-    bool is_pure_greedy() const { return is_pure_greedy_; }
+    bool is_pure_greedy() const override { return is_pure_greedy_; }
     void set_pure_greedy(bool val) { is_pure_greedy_ = val; }
 
     static std::unique_ptr<SamplerLlama> create(

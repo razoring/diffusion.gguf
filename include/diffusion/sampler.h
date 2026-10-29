@@ -14,6 +14,7 @@ public:
     virtual bool can_accept(int32_t tok) const = 0;
     virtual int32_t sample(const float* logits, int abs_pos, float* out_prob = nullptr) = 0;
     virtual void* raw_chain() const { return nullptr; }
+    virtual bool is_pure_greedy() const { return false; }
 };
 
 } // namespace diffusion
