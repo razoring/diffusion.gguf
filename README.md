@@ -20,13 +20,13 @@ Rather than producing output strictly token-by-token ($B=1$), the engine generat
 - **Model:** Gemma 4 E4B IT Q4_K_M
 - **Parameters:** ctx `32,000`, temp `0.0`, max_output `2,048`
 
-| Engine | Block Size ($B$) | Output Tokens | Wall Time (s) | Throughput (tok/s) | Speedup vs `llama.cpp` | Speedup vs $B=1$ |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`llama.cpp`** (`v0.8.0`) | 1 | 1833 | 40.95 s | **59.04 tok/s** | 1.00x | 0.82x |
-| **`diffusion.gguf`** (`v0.1.0`) | 1 | 1834 | 33.47 s | **71.73 tok/s** | **1.22x** | 1.00x |
-| **`diffusion.gguf`** (`v0.1.0`) | 4 | 1825 | 33.33 s | **71.81 tok/s** | **1.22x** | 1.00x |
-| **`diffusion.gguf`** (`v0.1.0`) | 8 | 1771 | 32.23 s | **72.63 tok/s** | **1.23x** | 1.01x |
-| **`diffusion.gguf`** (`v0.1.0`) | 16 | 1856 | 34.09 s | **70.92 tok/s** | **1.20x** | 0.99x |
+| Engine | Block Size | Tokens Generated | Time (s) | Speed (tok/s) | Speedup vs llama.cpp | Speedup vs B=1 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| llama.cpp | 1 | 1833 | 39.67 | 60.60 | 1.00x | 0.81x |
+| diffusion.gguf | 1 | 1834 | 32.13 | 74.53 | 1.23x | 1.00x |
+| diffusion.gguf | 4 | 1825 | 31.96 | 74.97 | 1.24x | 1.01x |
+| diffusion.gguf | 8 | 1771 | 31.05 | 76.15 | 1.26x | 1.02x |
+| diffusion.gguf | 16 | 1856 | 32.69 | 73.89 | 1.22x | 0.99x |
 
 *Reproduce via:*
 ```bash
