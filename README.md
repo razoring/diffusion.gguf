@@ -114,7 +114,7 @@ Provides an OpenAI-compatible endpoint (`/v1/chat/completions`) with Server-Sent
 
 ## 7. Current Limitations
 
-- **Scaling Ceiling at Higher Block Sizes ($B \ge 8$):** Fixed-point matching without speculation bounds commitment per pass to 1.15-1.20 tokens/iter on non-repetitive text. Multi-token jump confidence filters and latent mask roll-overs need expansion to realize the full 2x-3x theoretical speedup for $B=16$.
+- **Scaling Ceiling at Higher Block Sizes ($B \ge 8$):** Fixed-point matching without speculation bounds commitment per pass to 1.15-1.20 tokens/iter on non-repetitive text. Multi-token jump confidences remain bounded by the same fixed-point matching update and pass count; scaling beyond $B=8$ will require stronger confidence heuristics.
 - **Logit Head Parallelism:** LM-head evaluation across entire block dimensions currently computes full projection GEMMs before masking. Sparse head evaluation will further reduce Stage 2 latency.
 
 ---
@@ -128,3 +128,7 @@ Contributions are welcome. Areas where help is immediately needed:
 4. Higher block size confidence models and entropy filtering heuristics for $B \ge 8$.
 
 Please review existing issues or open a pull request.
+
+## 9. Acknowledgements
+
+This project builds on the work of [llama.cpp](https://github.com/ggerganov/llama.cpp) and its [contributors](https://github.com/ggerganov/llama.cpp/graphs/contributors). We are grateful to the llama.cpp team and community for their open-source work and for making the GGUF ecosystem and inference tooling this project depends on possible.
