@@ -130,7 +130,7 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.prompt_file = next_str("-f/--file");
         } else if (arg == "-n" || arg == "--predict") {
             args.params.n_predict = next_int("-n/--predict");
-        } else if (arg == "-c" || arg == "--ctx-size") {
+        } else if (arg == "-c" || arg == "-ctx" || arg == "--ctx" || arg == "--ctx-size") {
             args.backend.n_ctx = next_int("-c/--ctx-size");
             flags.n_ctx = true;
         } else if (arg == "-t" || arg == "--threads") {
@@ -234,13 +234,13 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.params.extract_reasoning = true;
         } else if (arg == "-s" || arg == "--seed") {
             args.params.sampling.seed = static_cast<uint32_t>(next_int("-s/--seed"));
-        } else if (arg == "--temp") {
+        } else if (arg == "-temp" || arg == "--temp") {
             args.params.sampling.temp = next_float("--temp");
-        } else if (arg == "--top-k") {
+        } else if (arg == "-top-k" || arg == "--top-k") {
             args.params.sampling.top_k = next_int("--top-k");
-        } else if (arg == "--top-p") {
+        } else if (arg == "-top-p" || arg == "--top-p") {
             args.params.sampling.top_p = next_float("--top-p");
-        } else if (arg == "--min-p") {
+        } else if (arg == "-min-p" || arg == "--min-p") {
             args.params.sampling.min_p = next_float("--min-p");
         } else if (arg == "--repeat-penalty") {
             args.params.sampling.repeat_penalty = next_float("--repeat-penalty");

@@ -15,7 +15,7 @@ struct BackendConfig {
     int32_t n_gpu_layers = 0;
     int32_t n_threads = 0; // 0 = auto-detect hardware concurrency
     bool flash_attn = true;
-    bool swa_full = false;
+    bool swa_full = true;
     bool kv_unified = true;
 
     // Multi-GPU options
@@ -108,6 +108,7 @@ private:
     llama_batch batch_{};
     bool batch_initialized_ = false;
     mutable int32_t last_sampled_token_ = -1;
+    bool gpu_sampler_active_ = false;
 
     std::vector<std::pair<std::string, float>> active_loras_;
     std::vector<std::pair<llama_adapter_lora*, std::string>> loaded_adapters_;

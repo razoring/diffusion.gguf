@@ -433,7 +433,7 @@ llama_context::llama_context(
         }
 
         sched_reserve();
-        output_reserve(16);
+        output_reserve(std::min<int32_t>(16, cparams.n_outputs_max));
 
         if (!cparams.flash_attn) {
             if (ggml_is_quantized(params.type_v)) {

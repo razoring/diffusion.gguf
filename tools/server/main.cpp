@@ -674,11 +674,11 @@ static ServerConfig parse_server_args(int argc, char** argv, os::ExplicitFlags& 
         else if (arg == "--port") cfg.port = next_int("--port");
         else if (arg == "-np" || arg == "--parallel") cfg.n_parallel = next_int("-np/--parallel");
         else if (arg == "--api-key") cfg.api_key = next_str("--api-key");
-        else if (arg == "-c" || arg == "--ctx-size") {
+        else if (arg == "-c" || arg == "-ctx" || arg == "--ctx" || arg == "--ctx-size") {
             cfg.backend.n_ctx = next_int("-c/--ctx-size");
             flags.n_ctx = true;
         }
-        else if (arg == "-b" || arg == "--batch-size") cfg.backend.n_batch = next_int("-b/--batch-size");
+        else if (arg == "--batch-size") cfg.backend.n_batch = next_int("--batch-size");
         else if (arg == "-ub" || arg == "--ubatch-size") cfg.backend.n_ubatch = next_int("-ub/--ubatch-size");
         else if (arg == "-t" || arg == "--threads") {
             cfg.backend.n_threads = next_int("-t/--threads");
@@ -701,6 +701,8 @@ static ServerConfig parse_server_args(int argc, char** argv, os::ExplicitFlags& 
             cfg.backend.flash_attn = false;
             flags.flash_attn = true;
         }
+        else if (arg == "--swa-full") cfg.backend.swa_full = true;
+        else if (arg == "--no-swa-full") cfg.backend.swa_full = false;
         else if (arg == "--kv-unified") cfg.backend.kv_unified = true;
         else if (arg == "--no-kv-unified") cfg.backend.kv_unified = false;
         else if (arg == "--no-mmap") cfg.backend.use_mmap = false;
@@ -746,9 +748,10 @@ static ServerConfig parse_server_args(int argc, char** argv, os::ExplicitFlags& 
             else cfg.default_params.init_strategy = InitStrategy::ADAPTIVE_ENTROPY;
         } else if (arg == "--annealed-attn") cfg.default_params.annealed_attention = true;
         else if (arg == "--no-annealed-attn") cfg.default_params.annealed_attention = false;
-        else if (arg == "--temp") cfg.default_params.sampling.temp = next_float("--temp");
-        else if (arg == "--top-p") cfg.default_params.sampling.top_p = next_float("--top-p");
-        else if (arg == "--top-k") cfg.default_params.sampling.top_k = next_int("--top-k");
+        else if (arg == "-temp" || arg == "--temp") cfg.default_params.sampling.temp = next_float("-temp/--temp");
+        else if (arg == "-top-p" || arg == "--top-p") cfg.default_params.sampling.top_p = next_float("-top-p/--top-p");
+        else if (arg == "-top-k" || arg == "--top-k") cfg.default_params.sampling.top_k = next_int("-top-k/--top-k");
+        else if (arg == "-min-p" || arg == "--min-p") cfg.default_params.sampling.min_p = next_float("-min-p/--min-p");
     }
 
     if (cfg.default_params.n_predict <= 128) {
