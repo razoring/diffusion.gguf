@@ -312,10 +312,10 @@ LogitsView BackendLlama::eval_custom_pos(const int32_t* toks, int n, const int32
         throw std::runtime_error("llama_decode failed during eval_custom_pos");
     }
 
-    if (llama_get_sampled_token_ith(ctx_, 0) >= 0) {
+    if (llama_get_sampled_token_ith(ctx_, -1) >= 0) {
         return LogitsView{nullptr, n_vocab_, want_all ? n : 1};
     }
-    const float* logits = llama_get_logits(ctx_);
+    const float* logits = want_all ? llama_get_logits(ctx_) : llama_get_logits_ith(ctx_, -1);
     return LogitsView{logits, n_vocab_, want_all ? n : 1};
 }
 

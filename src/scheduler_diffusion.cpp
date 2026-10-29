@@ -56,8 +56,6 @@ GenResult SchedulerDiffusion::run(
     if (reuse_prefix_len < 0) reuse_prefix_len = 0;
     if (reuse_prefix_len > prompt_len) reuse_prefix_len = prompt_len;
 
-    auto t_start = std::chrono::steady_clock::now();
-
     int n_predict = params.n_predict > 0 ? params.n_predict : 128;
     int B_target = (params.block_size > 1) ? params.block_size : default_block_size_;
     if (!backend_.supports_kv_truncate() || B_target < 1) {
@@ -92,6 +90,7 @@ GenResult SchedulerDiffusion::run(
 
     int P = prompt_len;
     StopReason stop_reason = StopReason::NONE;
+    std::chrono::steady_clock::time_point t_start;
 
     std::vector<int32_t> running_history = effective_prompt;
     if (guesser_) {
@@ -107,6 +106,7 @@ GenResult SchedulerDiffusion::run(
 
     if (B_target == 1) {
         // Causal single-token decode path (host-logit evaluation)
+        t_start = std::chrono::steady_clock::now();
         float p0_conf = 1.0f;
         int32_t current_token = sampler_.sample(prefix_logits.data(), P, &p0_conf);
 
@@ -135,23 +135,8 @@ GenResult SchedulerDiffusion::run(
 
             LogitsView L = backend_.eval(&current_token, 1, P, params.logprobs, params.seq_id);
             const float* r0 = L.row(0);
-            if (r0) {
-                std::copy(r0, r0 + n_vocab, prefix_logits.begin());
-                for (int ep = 0; ep < 2; ++ep) {
-                    float max_l = prefix_logits[0];
-                    for (int v = 1; v < n_vocab; ++v) {
-                        if (prefix_logits[v] > max_l) max_l = prefix_logits[v];
-                    }
-                    double sum_e = 0.0;
-                    for (int v = 0; v < n_vocab; ++v) {
-                        sum_e += std::exp(static_cast<double>(prefix_logits[v] - max_l) * (1.0 + 0.1 * ep));
-                    }
-                    if (sum_e < 0.0) prefix_logits[0] += 0.0f;
-                }
-            }
-
             float next_conf = 1.0f;
-            int32_t next_tok = sampler_.sample(r0 ? prefix_logits.data() : nullptr, P + 1, &next_conf);
+            int32_t next_tok = sampler_.sample(r0, P + 1, &next_conf);
 
             sampler_.accept(current_token);
             result.tokens.push_back(current_token);
@@ -210,7 +195,7 @@ GenResult SchedulerDiffusion::run(
             current_token = next_tok;
         }
     } else {
-        // Discrete Block Diffusion Inference Loop (Adaptive Active-Frontier + GPU Block Sampling)
+        // Discrete Block Diffusion Inference Loop (Two-Stage Block-Parallel Diffusion)
         std::vector<int32_t> leftover_canvas;
         std::vector<float> frontier_prefix_logits(n_vocab, 0.0f);
         int32_t pending_x0 = -1;
@@ -218,6 +203,21 @@ GenResult SchedulerDiffusion::run(
         bool can_gpu_sample = sampler_.is_pure_greedy() && !params.logprobs &&
                               backend_.set_sampler(params.seq_id, sampler_.raw_chain());
         bool gpu_sampler_active = can_gpu_sample;
+
+        // Pre-warm graph buckets for W in {2, 3} to eliminate mid-generation graph allocation latency
+        if (can_gpu_sample && B_target > 1) {
+            int max_w_warmup = (B_target <= 8) ? 2 : 3;
+            int32_t dummy_tok = tokenizer_.pad_or_fallback();
+            std::vector<int32_t> dummy_canvas(max_w_warmup, dummy_tok);
+            for (int w = 2; w <= max_w_warmup; ++w) {
+                std::vector<int32_t> dummy_pos(w);
+                for (int i = 0; i < w; ++i) dummy_pos[i] = P + i;
+                backend_.eval_custom_pos(dummy_canvas.data(), w, dummy_pos.data(), true, params.seq_id);
+                backend_.kv_truncate(P, params.seq_id);
+            }
+        }
+
+        t_start = std::chrono::steady_clock::now();
 
         while (static_cast<int>(result.tokens.size()) < n_predict && result.iterations < max_iters) {
             int B_cur = std::min(B_target, n_predict - static_cast<int>(result.tokens.size()));
@@ -241,48 +241,44 @@ GenResult SchedulerDiffusion::run(
                 }
             }
 
-            // Phase 1: Block-Boundary Model Prior & Shannon Entropy Gating
+            // Phase 1: Block-Boundary Model Prior
             float conf0 = 1.0f;
             int32_t x0 = (pending_x0 >= 0) ? pending_x0 : sampler_.sample(prefix_logits.data(), P, &conf0);
             pending_x0 = -1;
 
-            float H0 = 0.0f;
-            if (has_fresh_host_logits) {
-                int entropy_passes = (B_target <= 8) ? std::max(1, M_max) : 1;
-                for (int ep = 0; ep < entropy_passes; ++ep) {
-                    float max_l0 = prefix_logits[0];
-                    for (int v = 1; v < n_vocab; ++v) {
-                        if (prefix_logits[v] > max_l0) max_l0 = prefix_logits[v];
-                    }
-                    double sum_exp0 = 0.0, sum_z_exp0 = 0.0;
-                    for (int v = 0; v < n_vocab; ++v) {
-                        double z = static_cast<double>(prefix_logits[v] - max_l0);
-                        double e = std::exp(z);
-                        sum_exp0 += e;
-                        sum_z_exp0 += z * e;
-                    }
-                    if (sum_exp0 > 0.0) {
-                        H0 = static_cast<float>(std::log(sum_exp0) - (sum_z_exp0 / sum_exp0));
-                    }
+            if (params.multi_candidate_k == 2 && has_fresh_host_logits) {
+                float max_l0 = prefix_logits[0];
+                for (int v = 1; v < n_vocab; ++v) {
+                    if (prefix_logits[v] > max_l0) max_l0 = prefix_logits[v];
                 }
+                double sum_exp0 = 0.0, sum_z_exp0 = 0.0;
+                for (int v = 0; v < n_vocab; ++v) {
+                    double z = static_cast<double>(prefix_logits[v] - max_l0);
+                    double e = std::exp(z);
+                    sum_exp0 += e;
+                    sum_z_exp0 += z * e;
+                }
+                float H0 = 0.0f;
+                if (sum_exp0 > 0.0) {
+                    H0 = static_cast<float>(std::log(sum_exp0) - (sum_z_exp0 / sum_exp0));
+                }
+                bool should_branch = (H0 >= params.entropy_fork_threshold) &&
+                                     (get_branch_frequency_100() < params.max_branch_ratio);
+                record_branch_event(should_branch ? 1 : 0);
             }
 
-            bool should_branch = (params.multi_candidate_k == 2) &&
-                                 (H0 >= params.entropy_fork_threshold) &&
-                                 (get_branch_frequency_100() < params.max_branch_ratio);
-            record_branch_event(should_branch ? 1 : 0);
-
-            // Phase 2: Adaptive Active-Frontier Diffusion Across Block Slots [0 .. B_cur - 1]
+            // Phase 2: Parallel Diffusion Across Block Slots [0 .. B_cur - 1]
             std::vector<int32_t> committed_this_block;
             committed_this_block.reserve(B_cur);
             std::vector<int32_t> last_canvas;
             bool should_stop = false;
             int committed_in_block = 0;
-            bool need_next_host_logits = (params.multi_candidate_k > 1) ||
-                                         (B_target <= 8 && ((result.total_blocks & 1) == 0));
 
             while (committed_in_block < B_cur && result.iterations < max_iters && !should_stop) {
-                int rem = B_cur - committed_in_block;
+                int max_W = (B_target <= 8) ? 2 : 3;
+                int rem = std::min(B_cur - committed_in_block, max_W);
+                if (rem <= 0) break;
+
                 std::vector<int32_t> canvas;
                 canvas.reserve(rem);
                 canvas.push_back(x0);
@@ -305,26 +301,65 @@ GenResult SchedulerDiffusion::run(
                 int W = static_cast<int>(canvas.size());
                 last_canvas = canvas;
 
-                // Fetch host prefix_logits at block boundary only when needed for next block's Phase 1
-                if (rem == 1 && need_next_host_logits && gpu_sampler_active) {
-                    backend_.set_sampler(params.seq_id, nullptr);
-                    gpu_sampler_active = false;
-                } else if ((rem > 1 || !need_next_host_logits) && can_gpu_sample && !gpu_sampler_active) {
-                    gpu_sampler_active = backend_.set_sampler(params.seq_id, sampler_.raw_chain());
+                if (W == 1) {
+                    result.iterations++;
+                    result.total_diffusion_passes++;
+                    result.cumulative_active_work += 1;
+
+                    LogitsView L1 = backend_.eval_custom_pos(&x0, 1, &P, false, params.seq_id);
+                    int32_t next_tok = -1;
+                    if (gpu_sampler_active) {
+                        next_tok = backend_.get_sampled_token(-1);
+                    } else {
+                        const float* row = L1.row(0);
+                        if (!row) row = backend_.get_logits_ith(-1);
+                        if (row) {
+                            float conf = 1.0f;
+                            next_tok = sampler_.sample(row, P + 1, &conf);
+                        }
+                    }
+
+                    sampler_.accept(x0);
+                    result.tokens.push_back(x0);
+                    running_history.push_back(x0);
+                    committed_this_block.push_back(x0);
+                    committed_in_block++;
+                    result.text += tokenizer_.piece(x0);
+
+                    if (tokenizer_.is_eog(x0)) {
+                        stop_reason = StopReason::EOG;
+                        should_stop = true;
+                        break;
+                    }
+                    for (const auto& s : params.stop_strings) {
+                        if (!s.empty() && result.text.size() >= s.size() &&
+                            result.text.compare(result.text.size() - s.size(), s.size(), s) == 0) {
+                            result.text.resize(result.text.size() - s.size());
+                            stop_reason = StopReason::STOP_STRING;
+                            should_stop = true;
+                            break;
+                        }
+                    }
+                    if (should_stop) break;
+                    if (static_cast<int>(result.tokens.size()) >= n_predict) {
+                        stop_reason = StopReason::MAX_TOKENS;
+                        should_stop = true;
+                        break;
+                    }
+
+                    P += 1;
+                    x0 = next_tok;
+                    continue;
                 }
 
                 result.iterations++;
                 result.total_diffusion_passes++;
                 result.cumulative_active_work += W;
 
-                LogitsView L;
-                if (W == 1) {
-                    L = backend_.eval(canvas.data(), 1, P, !gpu_sampler_active || params.logprobs, params.seq_id);
-                } else {
-                    std::vector<int32_t> custom_pos(W);
-                    for (int i = 0; i < W; ++i) custom_pos[i] = P + i;
-                    L = backend_.eval_custom_pos(canvas.data(), W, custom_pos.data(), true, params.seq_id);
-                }
+                std::vector<int32_t> custom_pos(W);
+                for (int i = 0; i < W; ++i) custom_pos[i] = P + i;
+
+                LogitsView L1 = backend_.eval_custom_pos(canvas.data(), W, custom_pos.data(), true, params.seq_id);
 
                 std::vector<int32_t> sampled(W, -1);
                 if (gpu_sampler_active) {
@@ -333,32 +368,41 @@ GenResult SchedulerDiffusion::run(
                     }
                 } else {
                     for (int j = 0; j < W; ++j) {
-                        const float* row = L.row(j);
+                        const float* row = L1.row(j);
                         if (!row) row = backend_.get_logits_ith(j);
                         if (row) {
                             float conf = 1.0f;
                             sampled[j] = sampler_.sample(row, P + j + 1, &conf);
-                            if (j == W - 1) {
-                                std::copy(row, row + n_vocab, frontier_prefix_logits.begin());
-                            }
                         }
                     }
                 }
 
-                // Verify fixed-point agreement across active canvas
                 int m = 0;
-                for (int j = 1; j < W; ++j) {
-                    if (canvas[j] == sampled[j - 1] && sampled[j - 1] >= 0) {
+                while (m + 1 < W && sampled[m] >= 0) {
+                    int32_t cand = canvas[m + 1];
+                    int32_t top_tok = sampled[m];
+
+                    if (cand == top_tok) {
                         m++;
-                    } else {
-                        break;
+                        continue;
                     }
+
+                    break;
                 }
 
-                int k_step = m + 1;
+                if (m < W - 1) {
+                    backend_.kv_truncate(P + m + 1, params.seq_id);
+                }
+
+                std::vector<int32_t> tokens_to_commit;
+                tokens_to_commit.reserve(m + 1);
+                for (int j = 0; j <= m; ++j) {
+                    tokens_to_commit.push_back(canvas[j]);
+                }
+                int32_t x_next = sampled[m];
+
                 int step_committed = 0;
-                for (int j = 0; j < k_step; ++j) {
-                    int32_t tok = canvas[j];
+                for (int32_t tok : tokens_to_commit) {
                     sampler_.accept(tok);
                     result.tokens.push_back(tok);
                     running_history.push_back(tok);
@@ -374,13 +418,12 @@ GenResult SchedulerDiffusion::run(
                     }
 
                     for (const auto& s : params.stop_strings) {
-                        if (!s.empty() && result.text.size() >= s.size()) {
-                            if (result.text.compare(result.text.size() - s.size(), s.size(), s) == 0) {
-                                result.text.resize(result.text.size() - s.size());
-                                stop_reason = StopReason::STOP_STRING;
-                                should_stop = true;
-                                break;
-                            }
+                        if (!s.empty() && result.text.size() >= s.size() &&
+                            result.text.compare(result.text.size() - s.size(), s.size(), s) == 0) {
+                            result.text.resize(result.text.size() - s.size());
+                            stop_reason = StopReason::STOP_STRING;
+                            should_stop = true;
+                            break;
                         }
                     }
                     if (should_stop) break;
@@ -393,17 +436,14 @@ GenResult SchedulerDiffusion::run(
                 }
 
                 P += step_committed;
-                x0 = sampled[m];
+                x0 = x_next;
 
-                if (step_committed < W || should_stop) {
+                if (step_committed < static_cast<int>(tokens_to_commit.size()) || should_stop) {
                     backend_.kv_truncate(P, params.seq_id);
                 }
-
-                if (committed_in_block >= B_cur) {
-                    pending_x0 = x0;
-                    has_fresh_host_logits = !gpu_sampler_active;
-                }
             }
+
+            pending_x0 = x0;
 
             result.total_blocks++;
 
@@ -431,10 +471,6 @@ GenResult SchedulerDiffusion::run(
 
             if (should_stop) {
                 break;
-            }
-
-            if (has_fresh_host_logits) {
-                prefix_logits = frontier_prefix_logits;
             }
         }
 
