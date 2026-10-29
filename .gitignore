@@ -48,3 +48,4 @@ index.html
 benchmark_raw.json
 graphify-out/
 test-workspace/
+*.env

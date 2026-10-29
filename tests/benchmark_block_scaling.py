@@ -5,6 +5,7 @@ Strict parameters: ctx=32000, temp=0.0, max_predict=2048.
 Zero additional configuration parameters passed.
 """
 
+from dotenv import load_dotenv
 import argparse
 import json
 import os
@@ -12,14 +13,16 @@ import re
 import subprocess
 import sys
 import time
+import dotenv
 from pathlib import Path
+load_dotenv()
 
 DEFAULT_PROMPT = (
     "Write a comprehensive, detailed architectural analysis of modern operating system kernels, "
     "comparing monolithic, microkernel, and hybrid designs across memory management, scheduling, and driver isolation."
 )
 
-DEFAULT_MODEL_BLOB = Path(r"C:\Users\conta\.ollama\models\blobs\sha256-370c2879f17648d337b0ab4e208fdce348e24d1060064e93d7645daafd56d39c")
+DEFAULT_MODEL_BLOB = Path(r""+(os.getenv("model_dir")))
 
 
 def find_default_model() -> str:
