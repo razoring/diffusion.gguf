@@ -9,7 +9,6 @@ Rather than producing output strictly token-by-token ($B=1$), the engine generat
 
 - **Block-based generation:** Generates and refines groups of tokens in parallel instead of decoding one token at a time.
 - **Selective computation:** As tokens stabilize during refinement, computation is focused on positions that still need updates.
-- **CUDA graph reuse:** Caches CUDA graphs for common execution patterns to reduce launch and allocation overhead.
 - **Automatic startup configuration:** Detects available hardware and configures GPU offloading, Flash Attention, and batch settings automatically.
 - **No draft model required:** Works directly with the target model without speculative decoding or auxiliary models.
 
@@ -19,6 +18,7 @@ Rather than producing output strictly token-by-token ($B=1$), the engine generat
 - **Hardware:** 2x RTX 3060 12gb
 - **Model:** Gemma 4 E4B IT Q4_K_M
 - **Parameters:** ctx `32,000`, temp `0.0`, max_output `2,048`
+- **NO SPECULATIVE DECODING**
 
 | Engine | Block Size | Tokens Generated | Time (s) | Speed (tok/s) | Speedup vs llama.cpp | Speedup vs B=1 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
