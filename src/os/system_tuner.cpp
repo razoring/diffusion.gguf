@@ -137,7 +137,8 @@ void auto_tune_system(
     if (full_attention_interval <= 0) full_attention_interval = 1;
 
     int num_attn_layers = (full_attention_interval > 0) ? std::max(1, n_layer_all / full_attention_interval) : n_layer_all;
-    size_t kv_elems_per_token = static_cast<size_t>(num_attn_layers) * 2ULL * n_head_kv * key_length;
+    int seq_count = std::max(1, backend.n_seq_max);
+    size_t kv_elems_per_token = static_cast<size_t>(num_attn_layers) * 2ULL * n_head_kv * key_length * static_cast<size_t>(seq_count);
 
     // 1. Generation defaults: wave diffusion steps
     if (!flags.diffusion_steps) {
