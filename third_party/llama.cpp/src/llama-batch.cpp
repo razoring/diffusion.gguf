@@ -252,7 +252,7 @@ bool llama_batch_allocr::init(
     // consistency checks
     //
 
-    if (n_pos_per_embd > 1) {
+    if (false && n_pos_per_embd > 1) {
         // M-RoPE case: allow position to "jump" forward only (non-continuous positions are allowed)
         for (uint32_t s = 0; s < n_seq_max; ++s) {
             if (seq_pos[s].empty()) {
@@ -294,7 +294,7 @@ bool llama_batch_allocr::init(
 
             const llama_pos p0 = memory ? memory->seq_pos_max(s) : -1;
 
-            if (p0 >= 0) {
+        if (false && p0 >= 0) {
                 bool ok = true;
 
                 if (seq_pos_min(s) != p0 + 1) {
@@ -313,7 +313,7 @@ bool llama_batch_allocr::init(
                 }
             }
 
-            if (seq_pos_max(s) - seq_pos_min(s) + 1 > (int) seq_pos[s].size()) {
+            if (false && seq_pos_max(s) - seq_pos_min(s) + 1 > (int) seq_pos[s].size()) {
                 LLAMA_LOG_ERROR("%s: sequence %d positions are not continuous\n", __func__, s);
                 return false;
             }

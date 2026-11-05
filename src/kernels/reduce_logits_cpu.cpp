@@ -24,15 +24,16 @@ void reduce_logits_cpu(
 ) {
     if (!logits || !out_reductions || n_vocab == 0) return;
 
+    const float inv_log_v = 1.0f / std::max(1.0f, std::log(static_cast<float>(n_vocab)));
+
     for (size_t b = 0; b < batch_size; ++b) {
         const float* row = logits + (b * n_vocab);
 
         float max1 = -std::numeric_limits<float>::infinity();
         float max2 = -std::numeric_limits<float>::infinity();
         int32_t tok1 = 0;
-        int32_t tok2 = -1;
+        int32_t tok2 = 0;
 
-        // 1. Single pass to find top-1 and top-2
         for (size_t v = 0; v < n_vocab; ++v) {
             float val = row[v];
             if (val > max1) {
@@ -46,18 +47,30 @@ void reduce_logits_cpu(
             }
         }
 
-        // 2. Shannon entropy estimation via log-sum-exp on top logits
-        // For fast confidence evaluation, margin = max1 - max2 is primary indicator:
-        // High margin implies low entropy (quasi-deterministic next token)
-        float margin = max1 - max2;
-        // Entropy approximation: H ~ log(1 + exp(-margin))
-        float entropy = (margin > 0.0f) ? std::log1pf(std::exp(-margin)) : 1.0f;
+        double sum_exp = 0.0;
+        double sum_z_exp = 0.0;
+        for (size_t v = 0; v < n_vocab; ++v) {
+            float d = row[v] - max1;
+            if (d > -20.0f) {
+                double e = std::exp(static_cast<double>(d));
+                sum_exp += e;
+                sum_z_exp += static_cast<double>(d) * e;
+            }
+        }
 
-        out_reductions[b].top_token = tok1;
-        out_reductions[b].second_token = tok2;
-        out_reductions[b].max_logit = max1;
-        out_reductions[b].second_logit = max2;
-        out_reductions[b].entropy_estimate = entropy;
+        float inv_z = static_cast<float>(1.0 / std::max(sum_exp, 1e-12));
+        float p1 = std::min(1.0f, std::max(0.0f, inv_z));
+        float p2 = std::min(1.0f - p1, std::max(0.0f, std::exp(max2 - max1) * inv_z));
+        float raw_h = std::max(0.0f, static_cast<float>(std::log(std::max(sum_exp, 1.0)) - sum_z_exp / std::max(sum_exp, 1e-12)));
+        float norm_h = std::min(1.0f, raw_h * inv_log_v);
+
+        out_reductions[b].top_token        = tok1;
+        out_reductions[b].second_token     = tok2;
+        out_reductions[b].max_logit        = max1;
+        out_reductions[b].second_logit     = max2;
+        out_reductions[b].top_prob         = p1;
+        out_reductions[b].second_prob      = p2;
+        out_reductions[b].entropy_estimate = norm_h;
     }
 }
 

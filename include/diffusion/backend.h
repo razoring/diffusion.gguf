@@ -24,6 +24,7 @@ public:
     virtual int  n_vocab() const = 0;
     virtual int  n_ctx() const = 0;
     virtual bool supports_kv_truncate() const = 0;
+    virtual bool is_recurrent_or_hybrid() const { return false; }
 
     // Evaluates tokens at absolute positions [pos0, pos0 + n).
     // want_all=true -> returns logits for all n rows; want_all=false -> last row only.
@@ -40,6 +41,27 @@ public:
     virtual LogitsView eval_custom_pos(const int32_t* toks, int n, const int32_t* custom_pos, bool want_all = true, int32_t seq_id = 0) {
         (void)custom_pos;
         return eval(toks, n, custom_pos ? custom_pos[0] : 0, want_all, seq_id);
+    }
+
+    virtual LogitsView eval_superpos(
+        const int32_t* tok1,
+        const int32_t* tok2,
+        int32_t mask_id,
+        const float* w1,
+        const float* w2,
+        const float* wm,
+        int n,
+        const int32_t* custom_pos,
+        bool want_all = true,
+        int32_t seq_id = 0
+    ) {
+        (void)tok2; (void)mask_id; (void)w1; (void)w2; (void)wm;
+        return eval_custom_pos(tok1, n, custom_pos, want_all, seq_id);
+    }
+
+    virtual const float* get_logits_device_ptr() const { return nullptr; }
+    virtual void set_skip_host_logits_copy(bool skip) { (void)skip; }
+    virtual bool kv_rm_range(int32_t p0, int32_t p1, int32_t seq_id = 0) { (void)p0; (void)p1; (void)seq_id; return false;
     }
 
     // Direct access to logits of the i-th token in the last batch (or nullptr if logits[i] == 0)

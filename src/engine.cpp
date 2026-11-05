@@ -67,9 +67,8 @@ GenResult Engine::generate(
         params.ngram_n,
         params.ngram_pool_max
     );
-    int b_size = (params.block_size > 0) ? params.block_size : 8;
     int diff_steps = (params.diffusion_steps > 0) ? params.diffusion_steps : 3;
-    SchedulerDiffusion scheduler(*backend_, *tokenizer_, *sampler, b_size, diff_steps, &guesser);
+    SchedulerDiffusion scheduler(*backend_, *tokenizer_, *sampler, diff_steps, &guesser);
     GenResult result = scheduler.run(prompt_tokens, params, reuse_prefix_len, callback);
 
     // Save prompt cache if requested

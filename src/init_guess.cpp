@@ -42,7 +42,7 @@ void NgramPool::train(const std::vector<int32_t>& tokens) {
                 int32_t next_tok = tokens[i + order - 1];
                 auto& tr = table_[h];
                 int cnt = ++tr.counts[next_tok];
-                if (cnt > tr.best_count) {
+                if (cnt >= tr.best_count) {
                     tr.best_count = cnt;
                     tr.best_tok = next_tok;
                 }
@@ -61,7 +61,7 @@ int32_t NgramPool::predict(const std::vector<int32_t>& context, int32_t fallback
             const int32_t* ptr = context.data() + (ctx_len - prefix_len);
             uint64_t h = hash_prefix(ptr, prefix_len);
             auto it = table_.find(h);
-            if (it != table_.end() && it->second.best_tok >= 0 && (order >= 3 || (order == 2 && it->second.best_count >= 2))) {
+            if (it != table_.end() && it->second.best_tok >= 0) {
                 return it->second.best_tok;
             }
         }
@@ -95,7 +95,7 @@ void InitGuesser::update_ngram(const std::vector<int32_t>& tokens) {
         for (size_t i = (old_size > 0 ? old_size - 1 : 0); i + 1 < hist.size(); ++i) {
             int stem_len = 0;
             uint64_t sh = hash_stem_piece(tokenizer_.piece(hist[i]), stem_len);
-            if (stem_len >= 5 && !tokenizer_.is_eog(hist[i + 1])) {
+            if (stem_len >= 4 && !tokenizer_.is_eog(hist[i + 1])) {
                 stem_next_[sh] = hist[i + 1];
             }
         }
@@ -110,33 +110,55 @@ std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int3
     int32_t fallback_pad = tokenizer_.pad_or_fallback();
 
     if ((strategy_ == InitStrategy::NGRAM || strategy_ == InitStrategy::ADAPTIVE_ENTROPY) && !context.empty()) {
-        // 1. High-confidence multi-token phrase match from ContextTrie (require order >= 2)
-        int max_take = std::min(count, 4);
-        auto phrase = context_trie_.chain_match(context, max_take, 2);
-        for (int32_t tok : phrase) {
-            if (tokenizer_.is_eog(tok)) break;
-            guesses.push_back(tok);
-            if (static_cast<int>(guesses.size()) >= max_take) break;
-        }
+        std::vector<int32_t> cur_ctx = context;
+        cur_ctx.reserve(context.size() + count);
 
-        // 2. High-confidence single-token N-gram continuation if trie did not find a phrase
-        if (guesses.empty()) {
-            int32_t pred = ngram_pool_.predict(context, -1);
-            if (pred >= 0 && !tokenizer_.is_eog(pred) && pred != context.back()) {
-                guesses.push_back(pred);
+        while (static_cast<int>(guesses.size()) < count) {
+            int rem = count - static_cast<int>(guesses.size());
+
+            // 1. Multi-token phrase match from ContextTrie (order >= 2)
+            auto phrase = context_trie_.match_continuation(cur_ctx, rem, 2);
+            if (!phrase.empty()) {
+                bool added = false;
+                for (int32_t tok : phrase) {
+                    if (tokenizer_.is_eog(tok)) break;
+                    guesses.push_back(tok);
+                    cur_ctx.push_back(tok);
+                    added = true;
+                    if (static_cast<int>(guesses.size()) >= count) break;
+                }
+                if (added) continue;
             }
-        }
 
-        // 3. Subword stem matching fallback
-        if (guesses.empty()) {
+            // 2. Highest-frequency N-gram continuation (including 1-token bigrams)
+            int32_t pred = ngram_pool_.predict(cur_ctx, -1);
+            if (pred >= 0 && !tokenizer_.is_eog(pred) && pred != cur_ctx.back()) {
+                guesses.push_back(pred);
+                cur_ctx.push_back(pred);
+                continue;
+            }
+
+            // 3. Single-token most-recent ContextTrie continuation (order == 1)
+            auto single_match = context_trie_.match_continuation(cur_ctx, 1, 1);
+            if (!single_match.empty() && !tokenizer_.is_eog(single_match[0]) && single_match[0] != cur_ctx.back()) {
+                guesses.push_back(single_match[0]);
+                cur_ctx.push_back(single_match[0]);
+                continue;
+            }
+
+            // 4. Subword stem matching fallback
             int stem_len = 0;
-            uint64_t sh = hash_stem_piece(tokenizer_.piece(context.back()), stem_len);
+            uint64_t sh = hash_stem_piece(tokenizer_.piece(cur_ctx.back()), stem_len);
             if (stem_len >= 3) {
                 auto s_it = stem_next_.find(sh);
-                if (s_it != stem_next_.end() && s_it->second >= 0 && !tokenizer_.is_eog(s_it->second)) {
+                if (s_it != stem_next_.end() && s_it->second >= 0 && !tokenizer_.is_eog(s_it->second) && s_it->second != cur_ctx.back()) {
                     guesses.push_back(s_it->second);
+                    cur_ctx.push_back(s_it->second);
+                    continue;
                 }
             }
+
+            break;
         }
 
         return guesses;

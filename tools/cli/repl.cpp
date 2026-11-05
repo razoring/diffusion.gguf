@@ -67,7 +67,7 @@ void run_repl(Engine& engine, CliArgs& args) {
     const char* mode_name = (args.params.mode == DecodeMode::WHOLE) ? "whole" : "block";
 
     std::cout << "=== diffusion.gguf REPL (mode: " << mode_name
-              << ", block: " << args.params.block_size << ") ===\n"
+ << ") ===\n"
               << "Type /help for commands, Ctrl+C to cancel generation, /exit to quit.\n\n";
 
     std::string line;
@@ -123,16 +123,6 @@ void run_repl(Engine& engine, CliArgs& args) {
             } else {
                 args.params.mode = DecodeMode::BLOCK;
                 std::cout << "[Mode set to block]\n\n";
-            }
-            continue;
-        }
-
-        if (input.rfind("/block ", 0) == 0) {
-            try {
-                args.params.block_size = std::stoi(input.substr(7));
-                std::cout << "[Block size set to " << args.params.block_size << "]\n\n";
-            } catch (...) {
-                std::cout << "[Invalid block size]\n\n";
             }
             continue;
         }

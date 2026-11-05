@@ -308,7 +308,7 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
                 case GGML_TYPE_IQ4_XS:
                     return ne11 <= 6;
                 default:
-                    return ne11 <= MMVQ_MAX_BATCH_SIZE;
+                    return turing_mma_available(cc) ? (ne11 <= 4) : (ne11 <= MMVQ_MAX_BATCH_SIZE);
             }
         }
         switch (type) { // tuned for CDNA2
@@ -321,10 +321,10 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
             case GGML_TYPE_Q6_K:
                 return ne11 <= 5;
             default:
-                return ne11 <= MMVQ_MAX_BATCH_SIZE;
+                return turing_mma_available(cc) ? (ne11 <= 4) : (ne11 <= MMVQ_MAX_BATCH_SIZE);
         }
     }
-    return ne11 <= MMVQ_MAX_BATCH_SIZE;
+    return turing_mma_available(cc) ? (ne11 <= 3) : (ne11 <= MMVQ_MAX_BATCH_SIZE);
 }
 
 // Device constexpr: returns the max batch size for the current arch+type at compile time.
@@ -792,7 +792,7 @@ static void mul_mat_vec_q_switch_fusion(
 
     const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr ||
                             fusion.x_scale != nullptr || fusion.gate_scale != nullptr;
-    if constexpr (c_ncols_dst <= MMVQ_MAX_BATCH_SIZE) {
+    if constexpr (c_ncols_dst == 1) {
         if (has_fusion) {
             const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(block_nums, block_dims, nbytes_shared, stream);
             ggml_cuda_kernel_launch(mul_mat_vec_q<type, c_ncols_dst, true, small_k>, launch_params,
@@ -1172,7 +1172,7 @@ void ggml_cuda_mul_mat_vec_q(
 
     if (fusion) {
         GGML_ASSERT( !ids || dst->ne[2] == 1);
-        GGML_ASSERT(  ids || dst->ne[1] <= MMVQ_MAX_BATCH_SIZE);
+        GGML_ASSERT(  ids || dst->ne[1] == 1);
         // Scale fusion is only allowed for NVFP4 currently as the cost of checking this at run-time in the prologue is
         // non-negligible for some models such as gpt-oss-20b
         GGML_ASSERT((fusion->x_scale == nullptr && fusion->gate_scale == nullptr) || src0->type == GGML_TYPE_NVFP4);

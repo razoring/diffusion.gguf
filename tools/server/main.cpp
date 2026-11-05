@@ -631,7 +631,6 @@ static void print_server_help() {
               << "  --lora PATH              Load LoRA adapter\n\n"
               << "Default Generation Options:\n"
               << "  --mode MODE              Decoding mode: block (default), whole, ar\n"
-              << "  --block N                Jacobi block size (default: 32)\n"
               << "  --whole-max N            Max canvas size for whole mode (default: 512)\n"
               << "  --init STRAT             Initial guess: ngram (default), random, pad\n"
               << "  --temp FLOAT             Temperature (default: 0.8)\n"
@@ -731,10 +730,6 @@ static ServerConfig parse_server_args(int argc, char** argv, os::ExplicitFlags& 
             (void)0;
         }
         else if (arg == "-n" || arg == "--n-predict") cfg.default_params.n_predict = next_int("-n/--n-predict");
-        else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
-            cfg.default_params.block_size = next_int("--block/--block-size");
-            flags.block_size = true;
-        }
         else if (arg == "--diffusion-steps" || arg == "--diff-steps") {
             cfg.default_params.diffusion_steps = next_int("--diffusion-steps");
             flags.diffusion_steps = true;
@@ -929,7 +924,6 @@ static GenParams parse_request_params(const json& body, const GenParams& default
         } else if (m == "whole") params.mode = DecodeMode::WHOLE;
         else if (m == "block") params.mode = DecodeMode::BLOCK;
 
-        if (diff.contains("block_size")) params.block_size = diff["block_size"].get<int>();
         if (diff.contains("diffusion_steps")) params.diffusion_steps = diff["diffusion_steps"].get<int>();
         if (diff.contains("diffusion_steps")) params.diffusion_steps = diff["diffusion_steps"].get<int>();
         if (diff.contains("whole_max")) params.whole_max = diff["whole_max"].get<int>();
@@ -1163,6 +1157,7 @@ int main(int argc, char** argv) {
         json data_arr = json::array();
         int total_prompt_tokens = 0;
 
+        std::lock_guard<std::mutex> lock(engine_mutex);
         engine->backend().set_embeddings(true);
         for (size_t idx = 0; idx < inputs.size(); ++idx) {
             auto toks = engine->tokenizer().tokenize(inputs[idx], true, true);
@@ -1226,7 +1221,12 @@ int main(int argc, char** argv) {
         params.seq_id = slot->id;
         params.sampling.infill = true;
 
-        auto result = engine->generate(prompt, params);
+        diffusion::GenResult result;
+        {
+            std::lock_guard<std::mutex> lock(engine_mutex);
+            result = engine->generate(prompt, params);
+            engine->backend().kv_clear(slot->id);
+        }
         engine->backend().kv_clear(slot->id);
         slot_manager.release_slot(slot);
 
@@ -1404,6 +1404,7 @@ int main(int argc, char** argv) {
                         std::lock_guard<std::mutex> lock(engine_mutex);
                         result = engine->generate(prompt, params, callback);
                         engine->backend().kv_clear(slot->id);
+
                     }
                     slot_manager.release_slot(slot);
 
@@ -1431,7 +1432,7 @@ int main(int argc, char** argv) {
                     sink.done();
                     return false;
                 }
-            );
+                , [&slot_manager, slot](bool) { slot_manager.release_slot(slot); } );
         }
     });
 
@@ -1739,7 +1740,8 @@ int main(int argc, char** argv) {
                             std::lock_guard<std::mutex> lock(engine_mutex);
                             prompt_tokens = engine->tokenizer().tokenize(prompt, true, true);
                             result = engine->generate(prompt, params, callback);
-                            engine->backend().kv_clear(slot->id);
+                        engine->backend().kv_clear(slot->id);
+    
                         }
                         slot_manager.release_slot(slot);
 
@@ -1782,18 +1784,20 @@ int main(int argc, char** argv) {
                         sink.done();
                     } catch (const std::exception& e) {
                         std::cerr << "[Stream Error] Generation error: " << e.what() << "\n";
-                        engine->backend().kv_clear(slot->id);
+                        { std::lock_guard<std::mutex> lock(engine_mutex); engine->backend().kv_clear(slot->id); }
+
                         slot_manager.release_slot(slot);
                         sink.done();
                     } catch (...) {
                         std::cerr << "[Stream Error] Unknown generation error\n";
-                        engine->backend().kv_clear(slot->id);
+                        { std::lock_guard<std::mutex> lock(engine_mutex); engine->backend().kv_clear(slot->id); }
+
                         slot_manager.release_slot(slot);
                         sink.done();
                     }
                     return false;
                 }
-            );
+                , [&slot_manager, slot](bool) { slot_manager.release_slot(slot); } );
         }
     };
     svr.Post("/v1/chat/completions", chat_handler);

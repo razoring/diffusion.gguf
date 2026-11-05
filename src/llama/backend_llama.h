@@ -71,11 +71,27 @@ public:
     int n_ctx() const override { return n_ctx_; }
     int n_embd() const override { return n_embd_; }
     bool supports_kv_truncate() const override;
+    bool is_recurrent_or_hybrid() const override;
     bool supports_kv_shift() const override;
 
     LogitsView eval(const int32_t* toks, int n, int pos0, bool want_all, int32_t seq_id = 0) override;
     LogitsView eval_active(const int32_t* toks, int n, int pos0, const uint8_t* active_mask, int32_t seq_id = 0) override;
     LogitsView eval_custom_pos(const int32_t* toks, int n, const int32_t* custom_pos, bool want_all = true, int32_t seq_id = 0) override;
+    LogitsView eval_superpos(
+        const int32_t* tok1,
+        const int32_t* tok2,
+        int32_t mask_id,
+        const float* w1,
+        const float* w2,
+        const float* wm,
+        int n,
+        const int32_t* custom_pos,
+        bool want_all = true,
+        int32_t seq_id = 0
+    ) override;
+    const float* get_logits_device_ptr() const override;
+    void set_skip_host_logits_copy(bool skip) override;
+    bool kv_rm_range(int32_t p0, int32_t p1, int32_t seq_id = 0) override;
     const float* get_logits_ith(int32_t i) const override;
     bool set_sampler(int32_t seq_id, void* sampler) override;
     int32_t get_sampled_token(int32_t idx = 0) const override;
@@ -104,6 +120,9 @@ private:
     int n_vocab_ = 0;
     int n_ctx_ = 0;
     int n_embd_ = 0;
+    int n_embd_inp_ = 0;
+    bool skip_host_logits_copy_ = false;
+    std::vector<float> superpos_embd_buf_;
     int batch_capacity_ = 0;
     llama_batch batch_{};
     bool batch_initialized_ = false;

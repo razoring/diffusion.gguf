@@ -80,11 +80,8 @@ void auto_tune_system(
     }
 
     // 1. Generation defaults: Act like autoregressive token-by-token generation (B=1)
-    if (!flags.block_size) {
-        params.block_size = 1;
-    }
     if (!flags.diffusion_steps) {
-        params.diffusion_steps = (params.block_size > 1 ? 3 : 1);
+        params.diffusion_steps = (true ? 3 : 1);
     }
 
     // 2. GPU Offloading and VRAM budget
@@ -172,7 +169,6 @@ void auto_tune_system(
                   << "  - flash_attn:   " << (backend.flash_attn ? "on" : "off") << (flags.flash_attn ? " [user]" : " [auto]") << "\n"
                   << "  - n_ctx:        " << backend.n_ctx << (flags.n_ctx ? " [user]" : " [auto]") << "\n"
                   << "  - threads:      " << backend.n_threads << (flags.n_threads ? " [user]" : " [auto]") << "\n"
-                  << "  - block_size:   " << params.block_size << (flags.block_size ? " [user]" : " [auto]") << "\n"
                   << "  - diff_steps:   " << params.diffusion_steps << (flags.diffusion_steps ? " [user]" : " [auto]") << "\n"
                   << "================================================================================\n\n";
         std::cerr.flush();

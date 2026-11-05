@@ -324,11 +324,12 @@ void diff_device_set_canvas(
     } else {
         cudaMemsetAsync(bufs.d_frozen_mask, 0, B * sizeof(uint8_t), s);
         uint8_t one = 1;
-        cudaMemcpyAsync(bufs.d_frozen_mask, &one, sizeof(uint8_t), cudaMemcpyHostToDevice, s);
+        cudaMemsetAsync(bufs.d_frozen_mask, 1, sizeof(uint8_t), s);
     }
     cudaMemsetAsync(bufs.d_converged, 0, sizeof(int32_t), s);
     int32_t b_init = static_cast<int32_t>(B > 1 ? B - 1 : 0);
     cudaMemcpyAsync(bufs.d_active_count, &b_init, sizeof(int32_t), cudaMemcpyHostToDevice, s);
+    if (s) cudaStreamSynchronize(s);
 }
 
 void diff_device_get_canvas(

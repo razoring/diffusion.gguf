@@ -261,9 +261,6 @@ CliArgs parse_cli_args(int argc, char** argv) {
             } else {
                 args.params.mode = DecodeMode::BLOCK;
             }
-        } else if (arg == "--block" || arg == "--block-size" || arg == "-b") {
-            args.params.block_size = next_int("--block/--block-size");
-            flags.block_size = true;
         } else if (arg == "--diffusion-steps" || arg == "--diff-steps") {
             args.params.diffusion_steps = next_int("--diffusion-steps");
             flags.diffusion_steps = true;

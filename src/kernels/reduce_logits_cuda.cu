@@ -8,11 +8,6 @@
 namespace diffusion {
 namespace kernels {
 
-struct ValIdx {
-    float val;
-    int32_t idx;
-};
-
 __device__ __forceinline__ void update_pair(
     float& max1, int32_t& tok1,
     float& max2, int32_t& tok2,
@@ -46,36 +41,56 @@ __device__ __forceinline__ void warp_reduce_top2(
     }
 }
 
+__device__ __forceinline__ float warp_reduce_sum(float val) {
+    unsigned int mask = 0xffffffff;
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(mask, val, offset);
+    }
+    return val;
+}
+
 __global__ void reduce_logits_cuda_kernel(
     const float* __restrict__ logits,
     size_t n_vocab,
     LogitsReduction* __restrict__ out
 ) {
-    // Each block reduces one batch element
     const size_t b = blockIdx.x;
     const float* row = logits + (b * n_vocab);
 
     float l_max1 = -1e30f;
     float l_max2 = -1e30f;
     int32_t l_tok1 = 0;
-    int32_t l_tok2 = -1;
+    int32_t l_tok2 = 0;
 
-    for (size_t i = threadIdx.x; i < n_vocab; i += blockDim.x) {
-        float val = row[i];
-        update_pair(l_max1, l_tok1, l_max2, l_tok2, val, static_cast<int32_t>(i));
+    const size_t n_vec = n_vocab / 4;
+    const float4* row4 = reinterpret_cast<const float4*>(row);
+    for (size_t i = threadIdx.x; i < n_vec; i += blockDim.x) {
+        float4 v = row4[i];
+        int32_t base = static_cast<int32_t>(i * 4);
+        update_pair(l_max1, l_tok1, l_max2, l_tok2, v.x, base + 0);
+        update_pair(l_max1, l_tok1, l_max2, l_tok2, v.y, base + 1);
+        update_pair(l_max1, l_tok1, l_max2, l_tok2, v.z, base + 2);
+        update_pair(l_max1, l_tok1, l_max2, l_tok2, v.w, base + 3);
+    }
+    for (size_t i = n_vec * 4 + threadIdx.x; i < n_vocab; i += blockDim.x) {
+        update_pair(l_max1, l_tok1, l_max2, l_tok2, row[i], static_cast<int32_t>(i));
     }
 
-    // Warp-level reduction
     warp_reduce_top2(l_max1, l_tok1, l_max2, l_tok2);
 
-    // Shared memory for 32 warps (1024 threads max)
     __shared__ float s_max1[32];
     __shared__ int32_t s_tok1[32];
     __shared__ float s_max2[32];
     __shared__ int32_t s_tok2[32];
+    __shared__ float s_row_max;
+    __shared__ float s_row_max2;
+    __shared__ int32_t s_row_tok1;
+    __shared__ int32_t s_row_tok2;
 
-    int lane = threadIdx.x % 32;
-    int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int warp_id = threadIdx.x >> 5;
+    const int num_warps = blockDim.x >> 5;
 
     if (lane == 0) {
         s_max1[warp_id] = l_max1;
@@ -86,23 +101,72 @@ __global__ void reduce_logits_cuda_kernel(
     __syncthreads();
 
     if (warp_id == 0) {
-        int num_warps = blockDim.x / 32;
         float b_max1 = (lane < num_warps) ? s_max1[lane] : -1e30f;
         int32_t b_tok1 = (lane < num_warps) ? s_tok1[lane] : 0;
         float b_max2 = (lane < num_warps) ? s_max2[lane] : -1e30f;
-        int32_t b_tok2 = (lane < num_warps) ? s_tok2[lane] : -1;
+        int32_t b_tok2 = (lane < num_warps) ? s_tok2[lane] : 0;
 
         warp_reduce_top2(b_max1, b_tok1, b_max2, b_tok2);
 
         if (lane == 0) {
-            float margin = b_max1 - b_max2;
-            float entropy = (margin > 0.0f) ? log1pf(expf(-margin)) : 1.0f;
+            s_row_max  = b_max1;
+            s_row_max2 = b_max2;
+            s_row_tok1 = b_tok1;
+            s_row_tok2 = b_tok2;
+        }
+    }
+    __syncthreads();
 
-            out[b].top_token = b_tok1;
-            out[b].second_token = b_tok2;
-            out[b].max_logit = b_max1;
-            out[b].second_logit = b_max2;
-            out[b].entropy_estimate = entropy;
+    // Pass 2 (L2-hot): exact softmax partition Z and Shannon entropy sum
+    const float row_max = s_row_max;
+    float l_sum_exp = 0.0f;
+    float l_sum_z_exp = 0.0f;
+
+    for (size_t i = threadIdx.x; i < n_vec; i += blockDim.x) {
+        float4 v = row4[i];
+        float d0 = v.x - row_max; float e0 = (d0 > -20.0f) ? __expf(d0) : 0.0f;
+        float d1 = v.y - row_max; float e1 = (d1 > -20.0f) ? __expf(d1) : 0.0f;
+        float d2 = v.z - row_max; float e2 = (d2 > -20.0f) ? __expf(d2) : 0.0f;
+        float d3 = v.w - row_max; float e3 = (d3 > -20.0f) ? __expf(d3) : 0.0f;
+        l_sum_exp   += (e0 + e1) + (e2 + e3);
+        l_sum_z_exp += (d0 * e0 + d1 * e1) + (d2 * e2 + d3 * e3);
+    }
+    for (size_t i = n_vec * 4 + threadIdx.x; i < n_vocab; i += blockDim.x) {
+        float d = row[i] - row_max;
+        float e = (d > -20.0f) ? __expf(d) : 0.0f;
+        l_sum_exp   += e;
+        l_sum_z_exp += d * e;
+    }
+
+    l_sum_exp   = warp_reduce_sum(l_sum_exp);
+    l_sum_z_exp = warp_reduce_sum(l_sum_z_exp);
+
+    if (lane == 0) {
+        s_max1[warp_id] = l_sum_exp;
+        s_max2[warp_id] = l_sum_z_exp;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float b_sum_exp   = (lane < num_warps) ? s_max1[lane] : 0.0f;
+        float b_sum_z_exp = (lane < num_warps) ? s_max2[lane] : 0.0f;
+        b_sum_exp   = warp_reduce_sum(b_sum_exp);
+        b_sum_z_exp = warp_reduce_sum(b_sum_z_exp);
+
+        if (lane == 0) {
+            float inv_z = 1.0f / fmaxf(b_sum_exp, 1e-12f);
+            float p1 = fminf(1.0f, fmaxf(0.0f, inv_z));
+            float p2 = fminf(1.0f - p1, fmaxf(0.0f, __expf(s_row_max2 - row_max) * inv_z));
+            float raw_h = fmaxf(0.0f, logf(fmaxf(b_sum_exp, 1.0f)) - b_sum_z_exp * inv_z);
+            float norm_h = fminf(1.0f, raw_h / fmaxf(logf(static_cast<float>(n_vocab)), 1.0f));
+
+            out[b].top_token        = s_row_tok1;
+            out[b].second_token     = s_row_tok2;
+            out[b].max_logit        = row_max;
+            out[b].second_logit     = s_row_max2;
+            out[b].top_prob         = p1;
+            out[b].second_prob      = p2;
+            out[b].entropy_estimate = norm_h;
         }
     }
 }
@@ -126,6 +190,25 @@ void reduce_logits_cuda(
         n_vocab,
         d_out_reductions
     );
+}
+
+void reduce_logits_cuda_to_host(const float* d_logits, size_t n_vocab, size_t batch_size, LogitsReduction* h_out, void** d_buf, size_t* d_cap) {
+    if (!d_logits || !h_out || batch_size == 0 || n_vocab == 0 || !d_buf || !d_cap) return;
+    if (batch_size > *d_cap || !*d_buf) {
+        if (*d_buf) cudaFree(*d_buf);
+        *d_cap = batch_size > 64 ? batch_size : 64;
+        if (cudaMalloc(d_buf, (*d_cap) * sizeof(LogitsReduction)) != cudaSuccess) {
+            *d_buf = nullptr;
+            *d_cap = 0;
+            return;
+        }
+    }
+    reduce_logits_cuda(d_logits, n_vocab, batch_size, static_cast<LogitsReduction*>(*d_buf), nullptr);
+    cudaMemcpy(h_out, *d_buf, batch_size * sizeof(LogitsReduction), cudaMemcpyDeviceToHost);
+}
+
+void reduce_logits_cuda_free(void* d_buf) {
+    if (d_buf) cudaFree(d_buf);
 }
 
 } // namespace kernels

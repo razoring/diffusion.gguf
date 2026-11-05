@@ -80,6 +80,8 @@ struct llama_context {
 
     float * get_logits();
     float * get_logits_ith(int32_t i);
+    const float * get_logits_device_ptr() const { return gf_res_prev && gf_res_prev->get_logits() ? (const float *) gf_res_prev->get_logits()->data : nullptr; }
+    void set_skip_host_logits_copy(bool skip) { skip_host_logits_copy = skip; }
 
     float * get_embeddings();
     float * get_embeddings_ith(int32_t i);
@@ -373,6 +375,7 @@ private:
     };
     std::map<uint64_t, graph_bucket> gf_res_buckets;
     uint64_t active_bucket_key = 0;
+    bool skip_host_logits_copy = false;
 
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;

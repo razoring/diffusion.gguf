@@ -84,8 +84,7 @@ struct TokenLogprobs {
 
 struct GenParams {
     int32_t n_predict = 2048;
-    DecodeMode mode = DecodeMode::BLOCK;
-    int32_t block_size = 8; // Default B=8 discrete block diffusion
+    DecodeMode mode = DecodeMode::WHOLE;
     int32_t diffusion_steps = 3; // Default M=3 multi-pass discrete denoising schedule
     int32_t whole_max = 512;
     InitStrategy init_strategy = InitStrategy::ADAPTIVE_ENTROPY;

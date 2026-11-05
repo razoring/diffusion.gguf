@@ -1214,7 +1214,7 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
 
         sampler->iface->backend_init(sampler, buft);
 
-        sampling.samplers[seq_id] = sampler; return true;
+        sampling.samplers[seq_id] = sampler;
 
         sched_need_reserve = true;
 
@@ -1233,7 +1233,7 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
         return false;
     }
 
-    sampling.samplers.erase(seq_id); return true;
+    sampling.samplers.erase(seq_id);
 
     sched_need_reserve = true;
 
@@ -1310,7 +1310,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         ? ((uint64_t(ubatch.n_tokens) << 32) | uint64_t(n_outputs) | (sampling.samplers.empty() ? 0ULL : (1ULL << 63)))
         : 0ULL;
 
-    if (bucket_key != active_bucket_key) {
+    if (false && bucket_key != active_bucket_key) {
         if (sched) {
             ggml_backend_sched_synchronize(sched.get());
         }
@@ -1615,7 +1615,7 @@ static void copy_tensor_async_ints(
         GGML_ASSERT(ggml_is_contiguous(tensor) && "sampled tokens tensor must be contiguous for async copy");
 
         ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched, tensor);
-        ggml_backend_tensor_get_async(backend, tensor, sampled.data + row, 0, ggml_nbytes(tensor));
+        ggml_backend_tensor_get_async(backend, tensor, sampled.data + row, 0, sizeof(sampled.data[row]));
     }
 }
 
@@ -1740,7 +1740,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 const llama_seq_id seq_id = batch_inp.seq_id ? batch_inp.seq_id[i][s] : 0;
 
                 seq_output_count[seq_id]++;
-                if (seq_output_count[seq_id] > 1 && sampling.samplers.size() > 1) {
+                if (seq_output_count[seq_id] > 1) {
                     LLAMA_LOG_ERROR("%s: backend sampling requires at most one output token per sequence (seq_id %d had %d)\n",
                             __func__, seq_id, seq_output_count[seq_id]);
                     return -1;
@@ -1911,7 +1911,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
         }
 
         // extract logits
-        if (logits.data && t_logits && n_outputs > 0 && needs_raw_logits(ubatch, sampling.samplers)) {
+        if (!skip_host_logits_copy && logits.data && t_logits && n_outputs > 0 && needs_raw_logits(ubatch, sampling.samplers)) {
             ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched.get(), t_logits);
             GGML_ASSERT(backend_res != nullptr);
             GGML_ASSERT(logits.data != nullptr);
@@ -2094,7 +2094,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto n_embd     = hparams.n_embd;
     const auto n_embd_out = hparams.n_embd_out();
 
-    bool has_logits     = true;
+    bool has_logits     = !skip_host_logits_copy;
     bool has_embd       = cparams.embeddings;
     bool has_embd_nextn = cparams.embeddings_nextn;
 
@@ -2125,7 +2125,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     }
 
     // Allocate backend sampling output buffers if there are backend samplers configured.
-    const bool has_sampling = true;
+    const bool has_sampling = !sampling.samplers.empty();
     if (has_sampling) {
         backend_float_count = 2 * n_vocab * n_outputs_max;      // logits + probs
         backend_token_count = (1 + n_vocab) * n_outputs_max;    // sampled + candidates
@@ -3683,6 +3683,16 @@ void llama_set_warmup(llama_context * ctx, bool warmup) {
 
 void llama_synchronize(llama_context * ctx) {
     ctx->synchronize();
+}
+
+const float * llama_get_logits_device_ptr(llama_context * ctx) {
+    return ctx ? ctx->get_logits_device_ptr() : nullptr;
+}
+
+void llama_set_skip_host_logits_copy(llama_context * ctx, bool skip) {
+    if (ctx) {
+        ctx->set_skip_host_logits_copy(skip);
+    }
 }
 
 float * llama_get_logits(llama_context * ctx) {

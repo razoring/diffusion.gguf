@@ -128,6 +128,11 @@ public:
 
     ggml_tensor * tokens = nullptr; // I32 [n_batch]
     ggml_tensor * embd   = nullptr; // F32 [n_embd, n_batch]
+    ggml_tensor * tokens_2  = nullptr; // I32 [n_batch]
+    ggml_tensor * tokens_m  = nullptr; // I32 [n_batch]
+    ggml_tensor * weights_1 = nullptr; // F32 [1, n_batch]
+    ggml_tensor * weights_2 = nullptr; // F32 [1, n_batch]
+    ggml_tensor * weights_m = nullptr; // F32 [1, n_batch]
 
     const int64_t n_embd = 0;
 };
@@ -144,6 +149,11 @@ public:
 
     ggml_tensor * tokens = nullptr; // I32 [n_batch]
     ggml_tensor * embd   = nullptr; // F32 [n_embd, n_batch]
+    ggml_tensor * tokens_2  = nullptr; // I32 [n_batch]
+    ggml_tensor * tokens_m  = nullptr; // I32 [n_batch]
+    ggml_tensor * weights_1 = nullptr; // F32 [1, n_batch]
+    ggml_tensor * weights_2 = nullptr; // F32 [1, n_batch]
+    ggml_tensor * weights_m = nullptr; // F32 [1, n_batch]
     ggml_tensor * h      = nullptr; // F32 [n_embd, n_batch]
 
     const int64_t n_embd = 0;

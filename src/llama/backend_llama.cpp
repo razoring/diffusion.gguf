@@ -71,6 +71,9 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     const llama_vocab* vocab = llama_model_get_vocab(model_);
     n_vocab_ = llama_vocab_n_tokens(vocab);
     n_embd_ = llama_model_n_embd(model_);
+    n_embd_inp_ = llama_model_n_embd_inp(model_);
+    if (n_embd_inp_ <= 0) n_embd_inp_ = n_embd_;
+    superpos_embd_buf_.resize(64 * static_cast<size_t>( std::max(1, n_embd_inp_) ), 0.0f);
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = config.n_ctx;
@@ -86,7 +89,9 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     cparams.op_offload = true;
     cparams.no_perf = true;
     cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;
-    cparams.n_rs_seq = 64; // Enable recurrent-state rollback snapshots for hybrid models (Gemma 4, etc.)
+    const bool is_recr_hybrid = llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
+    cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;
+    cparams.n_rs_seq = is_recr_hybrid ? 8 : 0;
     cparams.type_k = parse_ggml_type(config.cache_type_k);
     cparams.type_v = parse_ggml_type(config.cache_type_v);
     bool quant_v = (cparams.type_v != GGML_TYPE_F16 && cparams.type_v != GGML_TYPE_F32);
@@ -176,6 +181,11 @@ bool BackendLlama::supports_kv_truncate() const {
     return llama_n_rs_seq(ctx_) > 0;
 }
 
+bool BackendLlama::is_recurrent_or_hybrid() const {
+    if (!model_) return false;
+    return llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
+}
+
 bool BackendLlama::supports_kv_shift() const {
     if (!ctx_) return false;
     llama_memory_t mem = llama_get_memory(ctx_);
@@ -211,7 +221,15 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
             if (last_sampled_token_ >= 0) {
                 return LogitsView{nullptr, n_vocab_, 1};
             }
-            const float* row = llama_get_logits_ith(ctx_, -1);
+            if (skip_host_logits_copy_) {
+                llama_synchronize(ctx_);
+                return LogitsView{llama_get_logits_device_ptr(ctx_), n_vocab_, 1};
+            }
+            if (skip_host_logits_copy_) {
+            llama_synchronize(ctx_);
+            return LogitsView{llama_get_logits_device_ptr(ctx_), n_vocab_, 1};
+        }
+        const float* row = llama_get_logits_ith(ctx_, -1);
             if (!row) {
                 throw std::runtime_error("Failed to get logits for last token");
             }
@@ -241,6 +259,10 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
         if (gpu_sampler_active_ && llama_get_sampled_token_ith(ctx_, 0) >= 0) {
             return LogitsView{nullptr, n_vocab_, n};
         }
+        if (skip_host_logits_copy_) {
+            llama_synchronize(ctx_);
+            return LogitsView{llama_get_logits_device_ptr(ctx_), n_vocab_, n};
+        }
         const float* logits = llama_get_logits(ctx_);
         if (!logits) {
             throw std::runtime_error("Failed to get output logits");
@@ -252,6 +274,10 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
             if (last_sampled_token_ >= 0) {
                 return LogitsView{nullptr, n_vocab_, 1};
             }
+        }
+        if (skip_host_logits_copy_) {
+            llama_synchronize(ctx_);
+            return LogitsView{llama_get_logits_device_ptr(ctx_), n_vocab_, 1};
         }
         const float* row = llama_get_logits_ith(ctx_, -1);
         if (!row) {
@@ -316,6 +342,87 @@ LogitsView BackendLlama::eval_custom_pos(const int32_t* toks, int n, const int32
 
     if (gpu_sampler_active_ && llama_get_sampled_token_ith(ctx_, -1) >= 0) {
         return LogitsView{nullptr, n_vocab_, want_all ? n : 1};
+    }
+    if (skip_host_logits_copy_) {
+        llama_synchronize(ctx_);
+        return LogitsView{llama_get_logits_device_ptr(ctx_), n_vocab_, want_all ? n : 1};
+    }
+    const float* logits = want_all ? llama_get_logits(ctx_) : llama_get_logits_ith(ctx_, -1);
+    return LogitsView{logits, n_vocab_, want_all ? n : 1};
+}
+
+const float* BackendLlama::get_logits_device_ptr() const {
+    if (!ctx_) return nullptr;
+    return llama_get_logits_device_ptr(ctx_);
+}
+
+void BackendLlama::set_skip_host_logits_copy(bool skip) {
+    skip_host_logits_copy_ = skip;
+    if (ctx_) {
+        llama_set_skip_host_logits_copy(ctx_, skip);
+    }
+}
+
+bool BackendLlama::kv_rm_range(int32_t p0, int32_t p1, int32_t seq_id) {
+    if (!ctx_) return false;
+    llama_memory_t mem = llama_get_memory(ctx_);
+    return llama_memory_seq_rm(mem, seq_id, p0, p1);
+}
+
+LogitsView BackendLlama::eval_superpos(
+    const int32_t* tok1,
+    const int32_t* tok2,
+    int32_t mask_id,
+    const float* w1,
+    const float* w2,
+    const float* wm,
+    int n,
+    const int32_t* custom_pos,
+    bool want_all,
+    int32_t seq_id
+) {
+    if (n <= 0) return LogitsView{};
+    if (!tok2 || !w1 || !w2 || !wm || mask_id < 0 || n_embd_inp_ < 5) {
+        return eval_custom_pos(tok1, n, custom_pos, want_all, seq_id);
+    }
+
+    if (n > batch_capacity_) {
+        llama_batch_free(batch_);
+        batch_ = llama_batch_init(n, 0, 1);
+        batch_capacity_ = n;
+    }
+
+    const size_t needed = static_cast<size_t>(n) * static_cast<size_t>(n_embd_inp_);
+    if (superpos_embd_buf_.size() < needed) {
+        superpos_embd_buf_.resize(needed, 0.0f);
+    }
+
+    for (int i = 0; i < n; ++i) {
+        batch_.token[i] = tok1[i];
+        batch_.pos[i] = custom_pos ? custom_pos[i] : i;
+        batch_.n_seq_id[i] = 1;
+        batch_.seq_id[i][0] = seq_id;
+        batch_.logits[i] = (want_all || i == n - 1) ? 1 : 0;
+
+        float* row = superpos_embd_buf_.data() + static_cast<size_t>(i) * n_embd_inp_;
+        row[0] = static_cast<float>(tok2[i]);
+        row[1] = static_cast<float>(mask_id);
+        row[2] = w1[i];
+        row[3] = w2[i];
+        row[4] = wm[i];
+    }
+    batch_.n_tokens = n;
+    batch_.embd = superpos_embd_buf_.data();
+
+    const int rc = llama_decode(ctx_, batch_);
+    batch_.embd = nullptr;
+    if (rc != 0) {
+        throw std::runtime_error("llama_decode failed during eval_superpos");
+    }
+
+    if (skip_host_logits_copy_) {
+        llama_synchronize(ctx_);
+        return LogitsView{llama_get_logits_device_ptr(ctx_), n_vocab_, want_all ? n : 1};
     }
     const float* logits = want_all ? llama_get_logits(ctx_) : llama_get_logits_ith(ctx_, -1);
     return LogitsView{logits, n_vocab_, want_all ? n : 1};

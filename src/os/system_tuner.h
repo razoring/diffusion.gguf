@@ -30,7 +30,6 @@ struct ExplicitFlags {
     bool n_threads = false;
     bool flash_attn = false;
     bool n_ctx = false;
-    bool block_size = false;
     bool diffusion_steps = false;
 };
 

@@ -1015,6 +1015,8 @@ extern "C" {
     // Negative indices can be used to access logits in reverse order, -1 is the last logit.
     // returns NULL for invalid ids.
     LLAMA_API float * llama_get_logits_ith(struct llama_context * ctx, int32_t i);
+    LLAMA_API const float * llama_get_logits_device_ptr(struct llama_context * ctx);
+    LLAMA_API void          llama_set_skip_host_logits_copy(struct llama_context * ctx, bool skip);
 
     // Get all output token embeddings.
     // when pooling_type == LLAMA_POOLING_TYPE_NONE or when using a generative model,

@@ -68,6 +68,24 @@ void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
         const int64_t n_tokens = ubatch->n_tokens;
 
         ggml_backend_tensor_set(tokens, ubatch->token, 0, n_tokens*ggml_element_size(tokens));
+        if (ubatch->embd && tokens_2) {
+            std::vector<int32_t> v_t2(n_tokens), v_tm(n_tokens);
+            std::vector<float>   v_w1(n_tokens), v_w2(n_tokens), v_wm(n_tokens);
+            for (int64_t i = 0; i < n_tokens; ++i) {
+                const float * row = ubatch->embd + i * n_embd;
+                v_t2[i] = (int32_t) row[0];
+                v_tm[i] = (int32_t) row[1];
+                v_w1[i] = row[2];
+                v_w2[i] = row[3];
+                v_wm[i] = row[4];
+            }
+            ggml_backend_tensor_set(tokens_2,  v_t2.data(), 0, n_tokens * sizeof(int32_t));
+            ggml_backend_tensor_set(tokens_m,  v_tm.data(), 0, n_tokens * sizeof(int32_t));
+            ggml_backend_tensor_set(weights_1, v_w1.data(), 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(weights_2, v_w2.data(), 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(weights_m, v_wm.data(), 0, n_tokens * sizeof(float));
+            return;
+        }
     }
 
     if (ubatch->embd) {
@@ -84,6 +102,7 @@ bool llm_graph_input_embd::can_reuse(const llm_graph_params & params) {
 
     res &= (!params.ubatch.token) || (tokens && tokens->ne[0] == params.ubatch.n_tokens);
     res &= (!params.ubatch.embd)  || (embd   &&   embd->ne[1] == params.ubatch.n_tokens);
+    res &= ((params.ubatch.token != nullptr && params.ubatch.embd != nullptr) == (tokens_2 != nullptr));
 
     return res;
 }
@@ -93,6 +112,24 @@ void llm_graph_input_embd_h::set_input(const llama_ubatch * ubatch) {
 
     if (ubatch->token) {
         ggml_backend_tensor_set(tokens, ubatch->token, 0, n_tokens*ggml_element_size(tokens));
+        if (ubatch->embd && tokens_2) {
+            std::vector<int32_t> v_t2(n_tokens), v_tm(n_tokens);
+            std::vector<float>   v_w1(n_tokens), v_w2(n_tokens), v_wm(n_tokens);
+            for (int64_t i = 0; i < n_tokens; ++i) {
+                const float * row = ubatch->embd + i * n_embd;
+                v_t2[i] = (int32_t) row[0];
+                v_tm[i] = (int32_t) row[1];
+                v_w1[i] = row[2];
+                v_w2[i] = row[3];
+                v_wm[i] = row[4];
+            }
+            ggml_backend_tensor_set(tokens_2,  v_t2.data(), 0, n_tokens * sizeof(int32_t));
+            ggml_backend_tensor_set(tokens_m,  v_tm.data(), 0, n_tokens * sizeof(int32_t));
+            ggml_backend_tensor_set(weights_1, v_w1.data(), 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(weights_2, v_w2.data(), 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(weights_m, v_wm.data(), 0, n_tokens * sizeof(float));
+            return;
+        }
     } else {
         // note: mtmd embedding input goes through here
         GGML_ASSERT(ubatch->embd);
@@ -2173,7 +2210,28 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd) const {
     {
         auto & cur = inps[0];
 
-        cur = ggml_get_rows(ctx0, tok_embd, inp->tokens);
+        if (ubatch.token && ubatch.embd) {
+            inp->tokens_2  = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_tokens);
+            inp->tokens_m  = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_tokens);
+            inp->weights_1 = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, ubatch.n_tokens);
+            inp->weights_2 = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, ubatch.n_tokens);
+            inp->weights_m = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, ubatch.n_tokens);
+            ggml_set_input(inp->tokens_2);
+            ggml_set_input(inp->tokens_m);
+            ggml_set_input(inp->weights_1);
+            ggml_set_input(inp->weights_2);
+            ggml_set_input(inp->weights_m);
+            ggml_tensor * e1 = ggml_get_rows(ctx0, tok_embd, inp->tokens);
+            ggml_tensor * e2 = ggml_get_rows(ctx0, tok_embd, inp->tokens_2);
+            ggml_tensor * em = ggml_get_rows(ctx0, tok_embd, inp->tokens_m);
+            cur = ggml_add(ctx0,
+                    ggml_add(ctx0,
+                        ggml_mul(ctx0, e1, inp->weights_1),
+                        ggml_mul(ctx0, e2, inp->weights_2)),
+                    ggml_mul(ctx0, em, inp->weights_m));
+        } else {
+            cur = ggml_get_rows(ctx0, tok_embd, inp->tokens);
+        }
 
         // apply lora for embedding tokens if needed
         for (const auto & lora : *loras) {
