@@ -10,84 +10,103 @@ namespace diffusion {
 void print_cli_help() {
     std::cout << "Usage: diffusion-cli -m <model.gguf> [options]\n\n"
               << "General Options:\n"
-              << "  -m, --model PATH         Path to GGUF model file (required)\n"
-              << "  -p, --prompt TEXT        Input prompt text\n"
-              << "  -f, --file PATH          Read prompt from file\n"
-              << "  -n, --predict N          Number of tokens to generate (default: 128)\n"
-              << "  -c, --ctx-size N         Context size (default: 2048)\n"
-              << "  -t, --threads N          Number of CPU threads (default: 4)\n"
-              << "  -ngl, --n-gpu-layers N   Number of layers to offload to GPU (default: 0)\n"
-              << "  -sm, --split-mode MODE   Multi-GPU split mode: none, layer (default), row\n"
-              << "  -mg, --main-gpu N        Main GPU index (default: 0)\n"
-              << "  -ts, --tensor-split S    Fraction of model to offload per GPU (e.g. '3,2')\n"
-              << "  -fa, --flash-attn        Enable Flash Attention\n"
-              << "  --no-mmap                Do not memory-map model file\n"
-              << "  --mlock                  Lock model in RAM (prevent swap)\n"
-              << "  --check-tensors          Validate tensor data integrity\n"
-              << "  --numa MODE              NUMA optimization: distribute, isolate, numactl, mirror\n"
-              << "  -s, --seed N             RNG seed (default: 42)\n\n"
-              << "Model Adaptation & KV Quantization:\n"
-              << "  --lora PATH              Apply LoRA adapter\n"
-              << "  --lora-scaled PATH SCALE Apply LoRA adapter with user scale\n"
-              << "  --control-vector PATH    Apply control vector file\n"
-              << "  --cache-type-k TYPE      KV cache data type for K (f16, q8_0, q4_0, etc.)\n"
-              << "  --cache-type-v TYPE      KV cache data type for V (f16, q8_0, q4_0, etc.)\n\n"
-              << "Context & RoPE Options:\n"
-              << "  --prompt-cache PATH      File to cache prompt KV state for instant startup\n"
-              << "  --prompt-cache-ro        Open prompt cache read-only\n"
-              << "  --prompt-cache-all       Cache both prompt and generated tokens\n"
-              << "  --ctx-shift              Enable rolling context shifting on overflow (default: true)\n"
-              << "  --no-ctx-shift           Disable context shifting (stop at max context)\n"
-              << "  --n-keep N               Number of prompt tokens to preserve during shift (default: 0)\n"
-              << "  --n-discard N            Number of tokens to discard during shift\n"
-              << "  --rope-scaling TYPE      RoPE scaling type: none, linear, yarn\n"
-              << "  --rope-freq-base FLOAT   RoPE base frequency\n"
-              << "  --rope-freq-scale FLOAT  RoPE frequency scaling factor\n"
-              << "  --yarn-orig-ctx N        YaRN original context size\n"
-              << "  --yarn-ext-factor FLOAT  YaRN extrapolation factor\n"
-              << "  --yarn-attn-factor FLOAT YaRN attention magnitude factor\n"
-              << "  --yarn-beta-fast FLOAT   YaRN low correction dim\n"
-              << "  --yarn-beta-slow FLOAT   YaRN high correction dim\n\n"
+              << "  -m, --model PATH                Path to GGUF model file (required)\n"
+              << "  -p, --prompt TEXT               Input prompt text\n"
+              << "  -f, --file PATH                 Read prompt from file\n"
+              << "  -n, --predict, --n-predict N    Number of tokens to generate (default: 128)\n"
+              << "  -c, -ctx, --ctx, --ctx-size N   Context size (default: auto-tuned based on VRAM)\n"
+              << "  -b, --batch-size N              Logical batch size (default: 2048)\n"
+              << "  -ub, --ubatch-size N            Physical micro-batch size (default: 512)\n"
+              << "  -t, --threads N                 Number of CPU threads (default: 4 on GPU, or hw/2)\n"
+              << "  -tb, --threads-batch N          Number of CPU threads for batch/prompt processing\n"
+              << "  -ngl, --n-gpu-layers N          Number of layers to offload to GPU (default: auto)\n"
+              << "  -sm, --split-mode MODE          Multi-GPU split mode: none, layer (default), row\n"
+              << "  -mg, --main-gpu N               Main GPU index (default: 0)\n"
+              << "  -ts, --tensor-split S           Fraction of model per GPU (e.g. '50,50')\n"
+              << "  -fa, --flash-attn               Enable Flash Attention (default: auto)\n"
+              << "  --no-flash-attn                 Disable Flash Attention\n"
+              << "  --no-mmap                       Do not memory-map model file\n"
+              << "  --mlock                         Lock model in RAM (prevent swap)\n"
+              << "  --check-tensors                 Validate tensor data integrity\n"
+              << "  --numa MODE                     NUMA optimization: distribute, isolate, numactl, mirror\n"
+              << "  -s, --seed N                    RNG seed (default: 42)\n\n"
+              << "Model Adaptation & KV Cache Options:\n"
+              << "  --lora PATH                     Apply LoRA adapter\n"
+              << "  --lora-scaled PATH SCALE        Apply LoRA adapter with user scale\n"
+              << "  --control-vector PATH           Apply control vector file\n"
+              << "  -ctk, --cache-type-k TYPE       KV cache data type for K (f16, q8_0, q4_0, etc.)\n"
+              << "  -ctv, --cache-type-v TYPE       KV cache data type for V (f16, q8_0, q4_0, etc.)\n"
+              << "  --prompt-cache PATH             File to cache prompt KV state for instant startup\n"
+              << "  --prompt-cache-ro               Open prompt cache read-only\n"
+              << "  --prompt-cache-all              Cache both prompt and generated tokens\n"
+              << "  --ctx-shift                     Enable rolling context shifting on overflow (default: true)\n"
+              << "  --no-ctx-shift                  Disable context shifting (stop at max context)\n"
+              << "  -k, --keep, --n-keep N          Number of prompt tokens to preserve during shift (default: 0)\n"
+              << "  --discard, --n-discard N        Number of tokens to discard during shift\n"
+              << "  --rope-scaling TYPE             RoPE scaling type: none, linear, yarn\n"
+              << "  --rope-freq-base FLOAT          RoPE base frequency\n"
+              << "  --rope-freq-scale FLOAT         RoPE frequency scaling factor\n"
+              << "  --yarn-orig-ctx N               YaRN original context size\n"
+              << "  --yarn-ext-factor FLOAT         YaRN extrapolation factor\n"
+              << "  --yarn-attn-factor FLOAT        YaRN attention magnitude factor\n"
+              << "  --yarn-beta-fast FLOAT          YaRN low correction dim\n"
+              << "  --yarn-beta-slow FLOAT          YaRN high correction dim\n\n"
+              << "Speculative Decoding & Multi-Token Prediction (MTP):\n"
+              << "  --enable-mtp, --mtp             Enable Multi-Token Prediction (MTP) layer offloading\n"
+              << "  --nextn, -nextn N               Number of next-n prediction tokens/layers\n"
+              << "  -md, --model-draft PATH         Draft model file for speculative decoding\n"
+              << "  -ngld, --gpu-layers-draft N     Draft model GPU layers\n"
+              << "  --draft-max, --draft-n N        Number of tokens to draft\n"
+              << "  --draft-min, --draft-n-min N    Minimum number of tokens to draft\n"
+              << "  --draft-p-min FLOAT             Minimum draft probability threshold\n"
+              << "  --draft-p-split FLOAT           Speculative decoding split probability\n"
+              << "  -ng, --spec-ngram-size-n N      N-gram lookup size for guess initialization\n"
+              << "  -lcs, --lookup-cache-static P   Static lookup cache file\n"
+              << "  -lcd, --lookup-cache-dynamic P  Dynamic lookup cache file\n\n"
               << "Sampling & Reasoning Options:\n"
-              << "  --temp FLOAT             Temperature (default: 0.8, 0 = greedy)\n"
-              << "  --top-k N                Top-k sampling (default: 40)\n"
-              << "  --top-p FLOAT            Top-p sampling (default: 0.95)\n"
-              << "  --min-p FLOAT            Min-p sampling (default: 0.05)\n"
-              << "  --top-n-sigma FLOAT      Top-n sigma sampling\n"
-              << "  --adaptive-p-target F    Adaptive-p target probability\n"
-              << "  --adaptive-p-decay F     Adaptive-p EMA decay (default: 0.9)\n"
-              << "  -l, --logit-bias ID:BIAS Add bias to token ID (can repeat)\n"
-              << "  --logprobs               Compute and output token logprobs\n"
-              << "  --top-logprobs N         Output top N candidate logprobs per token\n"
-              << "  --extract-reasoning      Extract <think> tags as reasoning content\n"
-              << "  --reasoning-budget N     Maximum tokens allowed in reasoning block\n"
-              << "  --repeat-penalty FLOAT   Repeat penalty (default: 1.0)\n"
-              << "  --repeat-last-n N        Repeat last n tokens (default: 64)\n"
-              << "  --presence-penalty FLOAT Presence penalty (default: 0.0)\n"
-              << "  --frequency-penalty F    Frequency penalty (default: 0.0)\n"
-              << "  --mirostat N             Mirostat (0=disabled, 1=v1, 2=v2)\n\n"
-              << "Diffusion Options:\n"
-              << "  --mode MODE              Decoding mode: block (default), whole\n"
-              << "  -b, --block N            Diffusion block size (default: 8)\n"
-              << "  --diffusion-steps N      Diffusion steps per block (default: 3)\n"
-              << "  --whole-max N            Max canvas size for whole mode (default: 512)\n"
-              << "  --init STRAT             Canvas init strategy: ngram (default), random, pad\n"
-              << "  --ngram-n N              N-gram context length for init guesser (default: 3)\n"
-              << "  --ngram-pool N           N-gram pool max capacity (default: 4096)\n"
-              << "  --max-iters N            Maximum iterations cap (default: n_predict + 8)\n"
-              << "  --rng-mode MODE          positional (default), llama-compat\n\n"
-              << "Display & Output Options:\n"
-              << "  --render STYLE           auto (default), live, progress, final\n"
-              << "  --render-fps N           Live terminal render framerate (default: 30)\n"
-              << "  --no-color               Disable ANSI color codes\n"
-              << "  --stats                  Print JSON timing and token stats to stderr\n"
-              << "  --tokens-out PATH        Dump generated token IDs to file (for test oracle)\n"
-              << "  -cnv, --conversation     Run interactive chat REPL mode\n"
-              << "  -sys, --system-prompt S  System prompt for chat mode\n"
-              << "  --chat-template JINJA    Override model Jinja chat template\n"
-              << "  -r, --reverse-prompt S   Stop string (can be specified multiple times)\n"
-              << "  -v, --version            Show version\n"
-              << "  -h, --help               Show this help message\n";
+              << "  -temp, --temp FLOAT             Temperature (default: 0.8, 0 = greedy)\n"
+              << "  -top-k, --top-k N               Top-k sampling (default: 40)\n"
+              << "  -top-p, --top-p FLOAT           Top-p sampling (default: 0.95)\n"
+              << "  -min-p, --min-p FLOAT           Min-p sampling (default: 0.05)\n"
+              << "  --top-n-sigma FLOAT             Top-n sigma sampling\n"
+              << "  --adaptive-p-target F           Adaptive-p target probability\n"
+              << "  --adaptive-p-decay F            Adaptive-p EMA decay (default: 0.9)\n"
+              << "  -l, --logit-bias ID:BIAS        Add bias to token ID (can repeat)\n"
+              << "  --logprobs                      Compute and output token logprobs\n"
+              << "  --top-logprobs N                Output top N candidate logprobs per token\n"
+              << "  --extract-reasoning             Extract <think> tags as reasoning content\n"
+              << "  --reasoning-budget N            Maximum tokens allowed in reasoning block\n"
+              << "  --repeat-penalty FLOAT          Repeat penalty (default: 1.0)\n"
+              << "  --repeat-last-n N               Repeat last n tokens (default: 64)\n"
+              << "  --presence-penalty FLOAT        Presence penalty (default: 0.0)\n"
+              << "  --frequency-penalty F           Frequency penalty (default: 0.0)\n"
+              << "  --mirostat N                    Mirostat (0=disabled, 1=v1, 2=v2)\n\n"
+              << "Diffusion Engine Options:\n"
+              << "  --mode MODE                     Decoding mode: block (default), whole\n"
+              << "  --diffusion-steps N             Diffusion steps per horizon window (default: 3)\n"
+              << "  --whole-max N                   Max canvas size for whole mode (default: 512)\n"
+              << "  --init STRAT                    Canvas init strategy: ngram (default), random, pad\n"
+              << "  --ngram-n N                     N-gram context length for init guesser (default: 3)\n"
+              << "  --ngram-pool N                  N-gram pool max capacity (default: 4096)\n"
+              << "  --max-iters N                   Maximum iterations cap (default: n_predict + 8)\n"
+              << "  --rng-mode MODE                 positional (default), llama-compat\n\n"
+              << "Display & Compatibility Options:\n"
+              << "  --render STYLE                  auto (default), live, progress, final\n"
+              << "  --render-fps N                  Live terminal render framerate (default: 30)\n"
+              << "  -co, --color                    Enable colored output\n"
+              << "  --no-color                      Disable ANSI color codes\n"
+              << "  --stats                         Print JSON timing and token stats to stderr\n"
+              << "  --perf                          Enable detailed compute timing performance logging\n"
+              << "  --no-warmup                     Skip model warmup pass\n"
+              << "  --simple-io                     Minimal plain I/O output format\n"
+              << "  --single-turn                   Exit after one generation in chat mode\n"
+              << "  --tokens-out PATH               Dump generated token IDs to file\n"
+              << "  -cnv, --conversation, -i        Run interactive chat REPL mode\n"
+              << "  -sys, --system-prompt S         System prompt for chat mode\n"
+              << "  --chat-template JINJA           Override model Jinja chat template\n"
+              << "  -r, --reverse-prompt S          Stop string (can be specified multiple times)\n"
+              << "  -v, --version                   Show version\n"
+              << "  -h, --help, --usage             Show this help message\n";
 }
 
 CliArgs parse_cli_args(int argc, char** argv) {
@@ -101,7 +120,7 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.show_version = true;
             return args;
         }
-        if (arg == "-h" || arg == "--help") {
+        if (arg == "-h" || arg == "--help" || arg == "--usage") {
             args.show_help = true;
             return args;
         }
@@ -128,15 +147,24 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.prompt = next_str("-p/--prompt");
         } else if (arg == "-f" || arg == "--file") {
             args.prompt_file = next_str("-f/--file");
-        } else if (arg == "-n" || arg == "--predict") {
+        } else if (arg == "-n" || arg == "--predict" || arg == "--n-predict") {
             args.params.n_predict = next_int("-n/--predict");
         } else if (arg == "-c" || arg == "-ctx" || arg == "--ctx" || arg == "--ctx-size") {
             args.backend.n_ctx = next_int("-c/--ctx-size");
             flags.n_ctx = true;
+        } else if (arg == "-b" || arg == "--batch-size") {
+            args.backend.n_batch = next_int("-b/--batch-size");
+            flags.n_batch = true;
+        } else if (arg == "-ub" || arg == "--ubatch-size") {
+            args.backend.n_ubatch = next_int("-ub/--ubatch-size");
+            flags.n_ubatch = true;
         } else if (arg == "-t" || arg == "--threads") {
             args.backend.n_threads = next_int("-t/--threads");
             flags.n_threads = true;
-        } else if (arg == "-ngl" || arg == "--n-gpu-layers") {
+        } else if (arg == "-tb" || arg == "--threads-batch") {
+            args.backend.n_threads_batch = next_int("-tb/--threads-batch");
+            flags.n_threads_batch = true;
+        } else if (arg == "-ngl" || arg == "--n-gpu-layers" || arg == "--gpu-layers") {
             args.backend.n_gpu_layers = next_int("-ngl/--n-gpu-layers");
             flags.n_gpu_layers = true;
         } else if (arg == "-sm" || arg == "--split-mode") {
@@ -144,13 +172,19 @@ CliArgs parse_cli_args(int argc, char** argv) {
             flags.split_mode = true;
             if (sm == "none") args.backend.split_mode = 0;
             else if (sm == "row") args.backend.split_mode = 2;
+            else if (sm == "tensor") args.backend.split_mode = 3;
             else args.backend.split_mode = 1;
         } else if (arg == "-mg" || arg == "--main-gpu") {
             args.backend.main_gpu = next_int("-mg/--main-gpu");
+            flags.main_gpu = true;
         } else if (arg == "-ts" || arg == "--tensor-split") {
             args.backend.tensor_split_str = next_str("-ts/--tensor-split");
+            flags.tensor_split = true;
         } else if (arg == "-fa" || arg == "--flash-attn") {
             args.backend.flash_attn = true;
+            flags.flash_attn = true;
+        } else if (arg == "--no-flash-attn") {
+            args.backend.flash_attn = false;
             flags.flash_attn = true;
         } else if (arg == "--no-mmap") {
             args.backend.use_mmap = false;
@@ -168,10 +202,12 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.backend.loras.push_back({path, scale});
         } else if (arg == "--control-vector") {
             args.backend.control_vector_path = next_str("--control-vector");
-        } else if (arg == "--cache-type-k") {
-            args.backend.cache_type_k = next_str("--cache-type-k");
-        } else if (arg == "--cache-type-v") {
-            args.backend.cache_type_v = next_str("--cache-type-v");
+        } else if (arg == "-ctk" || arg == "--cache-type-k") {
+            args.backend.cache_type_k = next_str("-ctk/--cache-type-k");
+            flags.cache_type_k = true;
+        } else if (arg == "-ctv" || arg == "--cache-type-v") {
+            args.backend.cache_type_v = next_str("-ctv/--cache-type-v");
+            flags.cache_type_v = true;
         } else if (arg == "--prompt-cache") {
             args.params.prompt_cache_path = next_str("--prompt-cache");
             args.backend.prompt_cache_path = args.params.prompt_cache_path;
@@ -185,10 +221,10 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.params.ctx_shift = true;
         } else if (arg == "--no-ctx-shift") {
             args.params.ctx_shift = false;
-        } else if (arg == "--n-keep") {
-            args.params.n_keep = next_int("--n-keep");
-        } else if (arg == "--n-discard") {
-            args.params.n_discard = next_int("--n-discard");
+        } else if (arg == "-k" || arg == "--keep" || arg == "--n-keep") {
+            args.params.n_keep = next_int("-k/--keep");
+        } else if (arg == "--discard" || arg == "--n-discard") {
+            args.params.n_discard = next_int("--discard");
         } else if (arg == "--rope-scaling") {
             std::string rs = next_str("--rope-scaling");
             if (rs == "none") args.backend.rope_scaling_type = 0;
@@ -208,6 +244,31 @@ CliArgs parse_cli_args(int argc, char** argv) {
             args.backend.yarn_beta_fast = next_float("--yarn-beta-fast");
         } else if (arg == "--yarn-beta-slow") {
             args.backend.yarn_beta_slow = next_float("--yarn-beta-slow");
+        } else if (arg == "--enable-mtp" || arg == "--mtp") {
+            args.backend.enable_mtp = true;
+            flags.enable_mtp = true;
+        } else if (arg == "--nextn" || arg == "-nextn") {
+            args.backend.nextn = next_int("--nextn");
+            args.backend.enable_mtp = true;
+            flags.enable_mtp = true;
+        } else if (arg == "-md" || arg == "--model-draft" || arg == "--spec-draft-model") {
+            args.speculative.draft_model_path = next_str("-md/--model-draft");
+        } else if (arg == "-ngld" || arg == "--gpu-layers-draft" || arg == "--n-gpu-layers-draft" || arg == "--spec-draft-ngl") {
+            args.speculative.draft_gpu_layers = next_int("-ngld/--gpu-layers-draft");
+        } else if (arg == "--draft" || arg == "--draft-n" || arg == "--draft-max" || arg == "--spec-draft-n-max") {
+            args.speculative.draft_max = next_int("--draft-max");
+        } else if (arg == "--draft-min" || arg == "--draft-n-min" || arg == "--spec-draft-n-min") {
+            args.speculative.draft_min = next_int("--draft-min");
+        } else if (arg == "--draft-p-min" || arg == "--spec-draft-p-min") {
+            args.speculative.draft_p_min = next_float("--draft-p-min");
+        } else if (arg == "--draft-p-split" || arg == "--spec-draft-p-split") {
+            args.speculative.draft_p_split = next_float("--draft-p-split");
+        } else if (arg == "-ng" || arg == "--spec-ngram-size-n" || arg == "--spec-ngram-mod-n-match") {
+            args.params.ngram_n = next_int("-ng/--spec-ngram-size-n");
+        } else if (arg == "-lcs" || arg == "--lookup-cache-static") {
+            args.speculative.lookup_cache_static = next_str("-lcs/--lookup-cache-static");
+        } else if (arg == "-lcd" || arg == "--lookup-cache-dynamic") {
+            args.speculative.lookup_cache_dynamic = next_str("-lcd/--lookup-cache-dynamic");
         } else if (arg == "--logprobs") {
             args.params.logprobs = true;
         } else if (arg == "--top-logprobs") {
@@ -255,7 +316,7 @@ CliArgs parse_cli_args(int argc, char** argv) {
         } else if (arg == "--mode") {
             std::string mode_str = next_str("--mode");
             if (mode_str == "ar") {
-                throw std::runtime_error("Autoregressive mode ('ar') has been completely removed. diffusion.gguf only supports diffusion generation ('block' or 'whole').");
+                throw std::runtime_error("Autoregressive mode ('ar') has been removed. diffusion.gguf operates via wave diffusion.");
             } else if (mode_str == "whole" || mode_str == "jacobi-whole") {
                 args.params.mode = DecodeMode::WHOLE;
             } else {
@@ -293,13 +354,23 @@ CliArgs parse_cli_args(int argc, char** argv) {
             else args.render_mode = RenderMode::AUTO;
         } else if (arg == "--render-fps") {
             args.render_fps = next_int("--render-fps");
+        } else if (arg == "-co" || arg == "--color") {
+            args.no_color = false;
         } else if (arg == "--no-color") {
             args.no_color = true;
         } else if (arg == "--stats") {
             args.show_stats = true;
+        } else if (arg == "--perf") {
+            args.backend.no_perf = false;
+        } else if (arg == "--no-warmup") {
+            args.backend.no_warmup = true;
+        } else if (arg == "--simple-io") {
+            args.render_mode = RenderMode::FINAL;
+        } else if (arg == "--single-turn") {
+            args.single_turn = true;
         } else if (arg == "--tokens-out") {
             args.tokens_out_file = next_str("--tokens-out");
-        } else if (arg == "-cnv" || arg == "--conversation" || arg == "--chat" || arg == "-i") {
+        } else if (arg == "-cnv" || arg == "--conversation" || arg == "--chat" || arg == "-i" || arg == "--interactive") {
             args.conversation = true;
         } else if (arg == "-sys" || arg == "--system-prompt") {
             args.system_prompt = next_str("-sys/--system-prompt");

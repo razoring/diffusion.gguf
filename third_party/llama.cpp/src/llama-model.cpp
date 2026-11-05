@@ -1294,7 +1294,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, n_layer_all + 1);
     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
         const bool is_swa = il < n_layer_all && hparams.is_swa(il);
-        const bool is_unused_nextn = (hparams.n_layer() > 0 && il >= (int) hparams.n_layer() && il < n_layer_all);
+        const bool is_unused_nextn = !params.enable_mtp && (hparams.n_layer() > 0 && il >= (int) hparams.n_layer() && il < n_layer_all);
         if (is_unused_nextn || il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
             LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(cpu_dev), is_swa);
             return {cpu_dev, &pimpl->cpu_buft_list};
@@ -2319,6 +2319,7 @@ llama_model_params llama_model_default_params() {
         /*.use_extra_bufts             =*/ true,
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
+        /*.enable_mtp                  =*/ false,
     };
 
     return result;

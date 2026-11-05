@@ -16,14 +16,18 @@ void query_cuda_specs(SystemProfile& profile) {
     profile.gpu_count = count;
     for (int i = 0; i < count; ++i) {
         cudaDeviceProp prop;
+        size_t total_b = 0;
         if (cudaGetDeviceProperties(&prop, i) == cudaSuccess) {
+            total_b = prop.totalGlobalMem;
             if (i == 0) {
                 profile.primary_gpu_name = prop.name;
                 profile.primary_gpu_vram_bytes = prop.totalGlobalMem;
             }
             profile.total_vram_bytes += prop.totalGlobalMem;
         }
-        size_t free_b = 0, total_b = 0;
+        profile.gpu_total_vram_bytes.push_back(total_b);
+
+        size_t free_b = 0;
         cudaSetDevice(i);
         if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
             if (i == 0) {
@@ -31,6 +35,7 @@ void query_cuda_specs(SystemProfile& profile) {
             }
             profile.free_vram_bytes += free_b;
         }
+        profile.gpu_free_vram_bytes.push_back(free_b);
     }
     cudaSetDevice(0);
 }

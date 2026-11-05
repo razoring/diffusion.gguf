@@ -17,6 +17,10 @@ static enum ggml_type parse_ggml_type(const std::string& s) {
     if (s == "q4_1") return GGML_TYPE_Q4_1;
     if (s == "q5_0") return GGML_TYPE_Q5_0;
     if (s == "q5_1") return GGML_TYPE_Q5_1;
+    if (s == "iq4_nl") return GGML_TYPE_IQ4_NL;
+    if (s == "iq4_xs") return GGML_TYPE_IQ4_XS;
+    if (s == "q4_k" || s == "q4_K") return GGML_TYPE_Q4_K;
+    if (s == "q8_k" || s == "q8_K") return GGML_TYPE_Q8_K;
     return GGML_TYPE_F16;
 }
 
@@ -39,6 +43,7 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     mparams.use_mmap = config.use_mmap;
     mparams.use_mlock = config.use_mlock;
     mparams.check_tensors = config.check_tensors;
+    mparams.enable_mtp = config.enable_mtp;
 
     if (config.split_mode == 0) {
         mparams.split_mode = LLAMA_SPLIT_MODE_NONE;
@@ -82,12 +87,12 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     cparams.n_ubatch = config.n_ubatch;
     int32_t threads = config.n_threads > 0 ? config.n_threads : std::max(1u, std::thread::hardware_concurrency() / 2);
     cparams.n_threads = threads;
-    cparams.n_threads_batch = threads;
+    cparams.n_threads_batch = (config.n_threads_batch > 0) ? config.n_threads_batch : threads;
     cparams.swa_full = config.swa_full;
     cparams.kv_unified = config.kv_unified;
     cparams.offload_kqv = true;
     cparams.op_offload = true;
-    cparams.no_perf = true;
+    cparams.no_perf = config.no_perf;
     cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;
     const bool is_recr_hybrid = llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
     cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;

@@ -203,6 +203,7 @@ void run_repl(Engine& engine, CliArgs& args) {
         cached_prompt_tokens.insert(cached_prompt_tokens.end(), result.tokens.begin(), result.tokens.end());
 
         std::cout << "\n";
+        if (args.single_turn) break;
     }
 }
 

@@ -14,9 +14,14 @@ struct BackendConfig {
     int32_t n_ubatch = 512;
     int32_t n_gpu_layers = 0;
     int32_t n_threads = 0; // 0 = auto-detect hardware concurrency
+    int32_t n_threads_batch = 0;
     bool flash_attn = true;
     bool swa_full = true;
     bool kv_unified = true;
+    bool enable_mtp = false;
+    int32_t nextn = 0;
+    bool no_perf = true;
+    bool no_warmup = false;
 
     // Multi-GPU options
     int32_t split_mode = 1; // 0=none, 1=layer (default), 2=row, 3=tensor
