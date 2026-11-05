@@ -412,6 +412,7 @@ GenResult SchedulerDiffusion::run(
             wave_wm[0] = 0.0f;
             int W = 1;
             bool any_superpos = false;
+            bool allow_superpos = false;
 
             if (!tokenizer_.is_eog(wave_tok1[0]) && W_cap > 1) {
                 // Build local suffix context ending at q0
@@ -507,7 +508,7 @@ GenResult SchedulerDiffusion::run(
                         wave_w1[r] = cp1 / norm;
                         wave_w2[r] = cp2 / norm;
                         wave_wm[r] = pm / norm;
-                        any_superpos = true;
+                        if (allow_superpos) any_superpos = true;
                     } else {
                         wave_w1[r] = 1.0f;
                         wave_w2[r] = 0.0f;

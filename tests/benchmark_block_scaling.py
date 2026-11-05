@@ -307,48 +307,37 @@ def main():
                     "speedup_vs_b1": 1.0,
                 }
 
-    # 2. Run diffusion.gguf for B in {1, 4, 8, 16}
-    block_sizes = [1, 4, 8, 16]
-    b1_tok_s = 1.0
+    # 2. Run diffusion.gguf (Whole-Canvas Diffusion with Soft-Locking)
     llama_tok_s = results.get("llama.cpp", {}).get("tok_per_s", 0.0)
 
-    for idx, b in enumerate(block_sizes, start=2):
-        print(f"\n[{idx}/5] Running diffusion.gguf (b={b}) ...")
-        cmd = [
-            str(diff_bin),
-            "-m", args.model,
-            "-c", str(args.ctx),
-            "-temp", str(args.temp),
-            "-n", str(args.predict),
-            "-b", str(b),
-            "-p", prompt
-        ]
-        code, stdout, elapsed = run_process_timed(cmd)
-        if code != 0:
-            print(f"Error: diffusion-cli b={b} failed with exit code {code}:\n{stdout[-500:]}")
-            results[f"diffusion_b{b}"] = {"error": f"Exit code {code}", "tokens": 0, "tok_per_s": 0.0}
-            continue
-
+    print("\n[2/2] Running diffusion.gguf (whole canvas) ...")
+    cmd = [
+        str(diff_bin),
+        "-m", args.model,
+        "-c", str(args.ctx),
+        "-temp", str(args.temp),
+        "-n", str(args.predict),
+        "-p", prompt
+    ]
+    code, stdout, elapsed = run_process_timed(cmd)
+    if code != 0:
+        print(f"Error: diffusion-cli failed with exit code {code}:\n{stdout[-500:]}")
+        results["diffusion.gguf"] = {"error": f"Exit code {code}", "tokens": 0, "tok_per_s": 0.0}
+    else:
         parsed = parse_diffusion_output(stdout)
         tok_s = parsed["tok_per_s"]
         toks = parsed["tokens"]
-        if b == 1:
-            b1_tok_s = tok_s if tok_s > 0 else 1.0
-
         sp_llama = (tok_s / llama_tok_s) if llama_tok_s > 0 else 1.0
-        sp_b1 = (tok_s / b1_tok_s) if b1_tok_s > 0 else 1.0
 
-        print(f"      -> Completed: {toks} tokens in {elapsed:.2f}s ({tok_s:.2f} tok/s) | vs llama: {sp_llama:.2f}x | vs b=1: {sp_b1:.2f}x")
-        results[f"diffusion_b{b}"] = {
+        print(f"      -> Completed: {toks} tokens in {elapsed:.2f}s ({tok_s:.2f} tok/s) | vs llama: {sp_llama:.2f}x")
+        results["diffusion.gguf"] = {
             "engine": "diffusion.gguf",
-            "block_size": b,
             "tokens": toks,
             "tok_per_s": tok_s,
             "iterations": parsed["iterations"],
             "tok_per_iter": parsed["tok_per_iter"],
             "time_s": elapsed,
             "speedup_vs_llama": round(sp_llama, 3),
-            "speedup_vs_b1": round(sp_b1, 3),
         }
 
     # Summary Table
@@ -361,19 +350,17 @@ def main():
         r = results["llama.cpp"]
         rows.append(("llama.cpp", "1", r["tokens"], f"{r['time_s']:.2f}", f"{r['tok_per_s']:.2f}", "1.00x", "1.00x"))
 
-    for b in block_sizes:
-        key = f"diffusion_b{b}"
-        if key in results and "tok_per_s" in results[key]:
-            r = results[key]
-            rows.append((
-                "diffusion.gguf",
-                str(b),
-                r["tokens"],
-                f"{r['time_s']:.2f}",
-                f"{r['tok_per_s']:.2f}",
-                f"{r['speedup_vs_llama']:.2f}x",
-                f"{r['speedup_vs_b1']:.2f}x"
-            ))
+    if "diffusion.gguf" in results and "tok_per_s" in results["diffusion.gguf"]:
+        r = results["diffusion.gguf"]
+        rows.append((
+            "diffusion.gguf",
+            "whole",
+            r["tokens"],
+            f"{r['time_s']:.2f}",
+            f"{r['tok_per_s']:.2f}",
+            f"{r['speedup_vs_llama']:.2f}x",
+            "-"
+        ))
 
     for row in rows:
         print(f" {row[0]:<18} | {row[1]:<6} | {row[2]:<8} | {row[3]:<9} | {row[4]:<14} | {row[5]:<13} | {row[6]:<8}")

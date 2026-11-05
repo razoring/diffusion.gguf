@@ -1,64 +1,29 @@
 {
   "config": {
-    "model": "C:\\Users\\conta\\.ollama\\models\\blobs\\sha256-370c2879f17648d337b0ab4e208fdce348e24d1060064e93d7645daafd56d39c",
-    "ctx": 32000,
+    "model": "C:\\Users\\conta\\.ollama\\models\\blobs\\sha256-a9d0a3e1d8c91732a3812becd31f8d4a8ff57414903f226306069f0437e2ac50",
+    "ctx": 8192,
     "temp": 0.0,
-    "predict": 2048,
+    "predict": 256,
     "prompt_chars": 204
   },
   "results": {
     "llama.cpp": {
       "engine": "llama.cpp",
       "block_size": 1,
-      "tokens": 1833,
-      "tok_per_s": 60.6,
-      "time_s": 39.674051699985284,
+      "tokens": 256,
+      "tok_per_s": 71.11,
+      "time_s": 9.616183999998611,
       "speedup_vs_llama": 1.0,
       "speedup_vs_b1": 1.0
     },
-    "diffusion_b1": {
+    "diffusion.gguf": {
       "engine": "diffusion.gguf",
-      "block_size": 1,
-      "tokens": 1834,
-      "tok_per_s": 74.5296,
-      "iterations": 1834,
-      "tok_per_iter": 1,
-      "time_s": 32.12727040000027,
-      "speedup_vs_llama": 1.23,
-      "speedup_vs_b1": 1.0
-    },
-    "diffusion_b4": {
-      "engine": "diffusion.gguf",
-      "block_size": 4,
-      "tokens": 1825,
-      "tok_per_s": 74.972,
-      "iterations": 1596,
-      "tok_per_iter": 1.14348,
-      "time_s": 31.961645099974703,
-      "speedup_vs_llama": 1.237,
-      "speedup_vs_b1": 1.006
-    },
-    "diffusion_b8": {
-      "engine": "diffusion.gguf",
-      "block_size": 8,
-      "tokens": 1771,
-      "tok_per_s": 76.1463,
-      "iterations": 1523,
-      "tok_per_iter": 1.16284,
-      "time_s": 31.05398680001963,
-      "speedup_vs_llama": 1.257,
-      "speedup_vs_b1": 1.022
-    },
-    "diffusion_b16": {
-      "engine": "diffusion.gguf",
-      "block_size": 16,
-      "tokens": 1856,
-      "tok_per_s": 73.8929,
-      "iterations": 1551,
-      "tok_per_iter": 1.19665,
-      "time_s": 32.6911804000265,
-      "speedup_vs_llama": 1.219,
-      "speedup_vs_b1": 0.991
+      "tokens": 256,
+      "tok_per_s": 76.9926,
+      "iterations": 226,
+      "tok_per_iter": 1.13274,
+      "time_s": 7.704847700002574,
+      "speedup_vs_llama": 1.083
     }
   }
 }
