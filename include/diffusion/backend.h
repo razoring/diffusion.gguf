@@ -60,6 +60,7 @@ public:
     }
 
     virtual const float* get_logits_device_ptr() const { return nullptr; }
+    virtual int32_t get_logits_device_id() const { return -1; }
     virtual void set_skip_host_logits_copy(bool skip) { (void)skip; }
     virtual bool kv_rm_range(int32_t p0, int32_t p1, int32_t seq_id = 0) { (void)p0; (void)p1; (void)seq_id; return false;
     }

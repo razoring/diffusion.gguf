@@ -60,6 +60,7 @@ private:
 
     void* d_reductions_ = nullptr;
     size_t d_reductions_cap_ = 0;
+    int d_reductions_dev_ = -1;
 
     std::deque<uint8_t> branch_history_100_;
     int branch_count_100_ = 0;

@@ -35,6 +35,8 @@ struct ModelTransition {
     int32_t tok2 = -1;
     float p1 = 0.0f;
     float p2 = 0.0f;
+    uint16_t count = 0;
+    uint16_t misses = 0;
 };
 
 static inline uint64_t hash_pair(int32_t a, int32_t b) {
@@ -86,9 +88,10 @@ SchedulerDiffusion::~SchedulerDiffusion() {
     }
 #if defined(GGML_USE_CUDA) || defined(DIFFUSION_USE_CUDA)
     if (d_reductions_) {
-        kernels::reduce_logits_cuda_free(d_reductions_);
+        kernels::reduce_logits_cuda_free(d_reductions_, d_reductions_dev_);
         d_reductions_ = nullptr;
         d_reductions_cap_ = 0;
+        d_reductions_dev_ = -1;
     }
 #endif
 }
@@ -134,30 +137,26 @@ GenResult SchedulerDiffusion::run(
 
     auto reduce_rows = [&](const LogitsView& L, int n_rows) -> std::vector<kernels::LogitsReduction> {
         std::vector<kernels::LogitsReduction> out(std::max(0, n_rows), kernels::LogitsReduction{-1, -1, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
-        if (n_rows <= 0) return out;
-        const float* d_logits = backend_.get_logits_device_ptr();
+        if (n_rows <= 0 || L.data == nullptr) return out;
 #if defined(GGML_USE_CUDA) || defined(DIFFUSION_USE_CUDA)
-        if (d_logits != nullptr) {
-            kernels::reduce_logits_cuda_to_host(
-                d_logits,
-                static_cast<size_t>(n_vocab),
-                static_cast<size_t>(n_rows),
-                out.data(),
-                &d_reductions_,
-                &d_reductions_cap_
-            );
-            if (d_reductions_ != nullptr) {
-                return out;
+        const float* d_logits = backend_.get_logits_device_ptr();
+        int dev_id = backend_.get_logits_device_id();
+        if (d_logits != nullptr && L.data == d_logits && dev_id >= 0) {
+            if (d_reductions_ && d_reductions_dev_ != dev_id) {
+                kernels::reduce_logits_cuda_free(d_reductions_, d_reductions_dev_);
+                d_reductions_ = nullptr;
+                d_reductions_cap_ = 0;
             }
+            d_reductions_dev_ = dev_id;
+            kernels::reduce_logits_cuda_to_host(d_logits, static_cast<size_t>(n_vocab), static_cast<size_t>(n_rows), out.data(), &d_reductions_, &d_reductions_cap_, dev_id);
+            return out;
         }
 #endif
-        if (L.data != nullptr) {
-            kernels::reduce_logits_cpu(L.data, static_cast<size_t>(n_vocab), static_cast<size_t>(n_rows), out.data());
-        }
+        kernels::reduce_logits_cpu(L.data, static_cast<size_t>(n_vocab), static_cast<size_t>(n_rows), out.data());
         return out;
     };
 
-    SkipLogitsGuard skip_guard(backend_, pure_greedy);
+    SkipLogitsGuard skip_guard(backend_, pure_greedy && kernels::has_gpu_reduction());
 
     // In-context LLM transition cache (populated from prefill + every diffusion wave)
     std::unordered_map<int32_t, ModelTransition> unigram_table;
@@ -169,24 +168,33 @@ GenResult SchedulerDiffusion::run(
 
     auto record_transition = [&](int32_t prev2, int32_t prev1, int32_t cur_tok, const kernels::LogitsReduction& red) {
         if (cur_tok < 0 || red.top_token < 0 || tokenizer_.is_eog(red.top_token)) return;
-        ModelTransition mt{red.top_token, red.second_token, red.top_prob, red.second_prob};
-        if (red.top_prob >= 0.35f) {
-            auto it1 = unigram_table.find(cur_tok);
-            if (it1 == unigram_table.end() || red.top_prob >= it1->second.p1 * 0.9f) {
-                unigram_table[cur_tok] = mt;
+        auto update_entry = [&](ModelTransition& entry) {
+            if (entry.tok1 == red.top_token) {
+                entry.count = static_cast<uint16_t>(std::min<int>(65535, entry.count + 1));
+                entry.p1 = std::max(entry.p1, red.top_prob);
+                entry.tok2 = red.second_token;
+                entry.p2 = red.second_prob;
+            } else if (entry.tok1 < 0) {
+                entry = ModelTransition{red.top_token, red.second_token, red.top_prob, red.second_prob, 1, 0};
+            } else {
+                uint16_t m = static_cast<uint16_t>(std::min<int>(65535, entry.misses + 1));
+                entry = ModelTransition{red.top_token, red.second_token, red.top_prob, red.second_prob, 1, m};
             }
+        };
+        if (red.top_prob >= 0.25f || unigram_table.find(cur_tok) != unigram_table.end()) {
+            update_entry(unigram_table[cur_tok]);
         }
-        if (prev1 >= 0 && red.top_prob >= 0.30f) {
-            bigram_table[hash_pair(prev1, cur_tok)] = mt;
+        if (prev1 >= 0 && (red.top_prob >= 0.20f || bigram_table.find(hash_pair(prev1, cur_tok)) != bigram_table.end())) {
+            update_entry(bigram_table[hash_pair(prev1, cur_tok)]);
         }
-        if (prev2 >= 0 && prev1 >= 0 && red.top_prob >= 0.25f) {
-            trigram_table[hash_triple(prev2, prev1, cur_tok)] = mt;
+        if (prev2 >= 0 && prev1 >= 0 && (red.top_prob >= 0.15f || trigram_table.find(hash_triple(prev2, prev1, cur_tok)) != trigram_table.end())) {
+            update_entry(trigram_table[hash_triple(prev2, prev1, cur_tok)]);
         }
     };
 
     // 1. Prefill prompt
     LogitsView prefill_logits;
-    bool prefill_all = pure_greedy && (B_target > 1) && (reuse_prefix_len == 0) && (prompt_len <= 256);
+    bool prefill_all = pure_greedy && (B_target > 1) && (reuse_prefix_len == 0) && (prompt_len <= 64);
     if (reuse_prefix_len == 0) {
         backend_.kv_clear(params.seq_id);
         prefill_logits = backend_.eval(effective_prompt.data(), prompt_len, 0, prefill_all, params.seq_id);
@@ -353,8 +361,8 @@ GenResult SchedulerDiffusion::run(
         const int32_t mask_id = tokenizer_.pad_or_fallback();
         const bool is_hybrid_recr = backend_.is_recurrent_or_hybrid();
 
-        // Maximum wave width scales with B_target (mmvq handles W<=4 in a single register pass)
-        const int max_W = (B_target <= 4) ? 2 : ((B_target <= 8) ? 3 : 4);
+        // Maximum wave width scales with B_target; for recurrent/hybrid models cap at 3 (bounded by n_rs_seq = 2)
+        const int max_W = is_hybrid_recr ? 4 : ((B_target <= 4) ? 2 : ((B_target <= 8) ? 3 : 4));
 
         int q0 = 0;           // Earliest non-soft-locked / non-KV canvas index
         bool should_stop = false;
@@ -412,15 +420,18 @@ GenResult SchedulerDiffusion::run(
             wave_wm[0] = 0.0f;
             int W = 1;
             bool any_superpos = false;
-            bool allow_superpos = false;
+            bool allow_superpos = true;
+            float chain_init_w = 1.0f;
 
             if (!tokenizer_.is_eog(wave_tok1[0]) && W_cap > 1) {
                 // Build local suffix context ending at q0
-                running_history.resize(effective_prompt.size() + q0 + 1);
-                running_history[effective_prompt.size() + q0] = wave_tok1[0];
+                std::vector<int32_t> local_ctx;
+                local_ctx.reserve(16);
+                for (int k = std::min(15, P_0 + q0); k >= 1; --k) { local_ctx.push_back(get_tok_at(q0 - k)); }
+                local_ctx.push_back(wave_tok1[0]);
                 std::vector<int32_t> trie_guesses;
                 if (guesser_) {
-                    trie_guesses = guesser_->make_guesses(W_cap - 1, running_history);
+                    trie_guesses = guesser_->make_guesses(W_cap - 1, local_ctx);
                 }
 
                 for (int r = 1; r < W_cap; ++r) {
@@ -437,10 +448,10 @@ GenResult SchedulerDiffusion::run(
                     // Priority A: LLM's own 3-gram transition table
                     if (prev3 >= 0 && prev2 >= 0 && prev1 >= 0) {
                         auto it3 = trigram_table.find(hash_triple(prev3, prev2, prev1));
-                        if (it3 != trigram_table.end() && it3->second.p1 >= 0.30f) {
+                        if (it3 != trigram_table.end() && (it3->second.p1 >= 0.20f || it3->second.count >= 1)) {
                             cand1 = it3->second.tok1;
                             cand2 = it3->second.tok2;
-                            cp1 = it3->second.p1;
+                            cp1 = std::max(0.75f, it3->second.p1);
                             cp2 = it3->second.p2;
                         }
                     }
@@ -448,10 +459,10 @@ GenResult SchedulerDiffusion::run(
                     // Priority B: LLM's own 2-gram transition table
                     if (cand1 < 0 && prev2 >= 0 && prev1 >= 0) {
                         auto it2 = bigram_table.find(hash_pair(prev2, prev1));
-                        if (it2 != bigram_table.end() && it2->second.p1 >= 0.35f) {
+                        if (it2 != bigram_table.end() && (it2->second.count >= 1 || it2->second.p1 >= 0.20f)) {
                             cand1 = it2->second.tok1;
                             cand2 = it2->second.tok2;
-                            cp1 = it2->second.p1;
+                            cp1 = std::max(0.65f, it2->second.p1);
                             cp2 = it2->second.p2;
                         }
                     }
@@ -459,7 +470,7 @@ GenResult SchedulerDiffusion::run(
                     // Priority C: ContextTrie / N-gram multi-token match
                     if (cand1 < 0 && r - 1 < static_cast<int>(trie_guesses.size())) {
                         cand1 = trie_guesses[r - 1];
-                        cp1 = 0.75f;
+                        cp1 = (r == 1) ? 0.78f : 0.80f;
                         if (canvas[pos].tok1 >= 0 && canvas[pos].tok1 != cand1) {
                             cand2 = canvas[pos].tok1;
                             cp2 = canvas[pos].p1 * 0.5f;
@@ -467,32 +478,40 @@ GenResult SchedulerDiffusion::run(
                     }
 
                     // Priority D: Existing active canvas token from previous diffusion pass
-                    if (cand1 < 0 && canvas[pos].tok1 >= 0 && canvas[pos].p1 >= 0.45f) {
+                    if (cand1 < 0 && canvas[pos].tok1 >= 0 && !tokenizer_.is_eog(canvas[pos].tok1) && canvas[pos].p1 >= 0.20f) {
                         cand1 = canvas[pos].tok1;
                         cand2 = canvas[pos].tok2;
-                        cp1 = canvas[pos].p1;
+                        cp1 = std::max(0.50f, canvas[pos].p1);
                         cp2 = canvas[pos].p2;
                     }
 
                     // Priority E: LLM's own 1-gram transition table
                     if (cand1 < 0 && prev1 >= 0) {
                         auto it1 = unigram_table.find(prev1);
-                        if (it1 != unigram_table.end() && it1->second.p1 >= 0.45f) {
+                        if (it1 != unigram_table.end() && (it1->second.count >= 1 || it1->second.p1 >= 0.20f)) {
                             cand1 = it1->second.tok1;
                             cand2 = it1->second.tok2;
-                            cp1 = it1->second.p1;
+                            cp1 = std::max(0.55f, it1->second.p1);
                             cp2 = it1->second.p2;
                         }
                     }
 
+                    // Compute-budget heuristic only: controls GPU work allocation.
+                    // Never affects correctness; omitted slots remain reachable in subsequent passes.
                     if (cand1 < 0 || tokenizer_.is_eog(cand1)) {
-                        break; // Stop expanding wave when no confident prior exists
+                        break;
+                    }
+                    float init_w1 = cp1;
+                    chain_init_w *= init_w1;
+                    if (r == 1 && init_w1 < 0.20f) {
+                        break;
+                    }
+                    if (r >= 2 && (init_w1 < 0.20f || chain_init_w < 0.04f)) {
+                        break;
                     }
 
+                    // Pure initialization of editable slot - DO NOT leak initialization priors into canvas confidence
                     canvas[pos].tok1 = cand1;
-                    if (cand2 >= 0) canvas[pos].tok2 = cand2;
-                    if (cp1 > 0.0f) canvas[pos].p1 = cp1;
-                    if (cp2 > 0.0f) canvas[pos].p2 = cp2;
                     if (canvas[pos].state == SlotState::MASKED) {
                         canvas[pos].state = SlotState::ACTIVE;
                     }
@@ -501,14 +520,12 @@ GenResult SchedulerDiffusion::run(
                     wave_tok2[r] = (cand2 >= 0 && cand2 != cand1) ? cand2 : cand1;
                     wave_pos[r] = P_0 + pos;
 
-                    // S3 Continuous Embedding Superposition for uncertain active slots
-                    if (cand2 >= 0 && cand2 != cand1 && cp1 > 0.0f && cp1 < 0.70f && cp2 >= 0.15f) {
-                        float pm = std::max(0.0f, 1.0f - (cp1 + cp2)) * 0.20f;
-                        float norm = cp1 + cp2 + pm;
-                        wave_w1[r] = cp1 / norm;
-                        wave_w2[r] = cp2 / norm;
-                        wave_wm[r] = pm / norm;
-                        if (allow_superpos) any_superpos = true;
+                    // S3 Continuous Embedding Superposition on far-horizon slots (r >= 2) with w1=0.45, w2=0.45, wm=0.10
+                    if (allow_superpos && r >= 2 && cand2 >= 0 && cand2 != cand1) {
+                        wave_w1[r] = 0.45f;
+                        wave_w2[r] = 0.45f;
+                        wave_wm[r] = 0.10f;
+                        any_superpos = true;
                     } else {
                         wave_w1[r] = 1.0f;
                         wave_w2[r] = 0.0f;
@@ -565,8 +582,49 @@ GenResult SchedulerDiffusion::run(
                 }
             }
 
-            // 4. Update LLM transition tables from all W rows evaluated in this wave
-            for (int r = 0; r < W && r < static_cast<int>(reds.size()); ++r) {
+            // 4. Update LLM transition tables from verified rows only (defer until K_lock is verified below)
+            std::vector<TokenDiff> step_diffs;
+            int K_lock = 1; // Slot q0 is always fed with exact discrete token (wave_w1[0] == 1.0f)
+            while (K_lock < W && K_lock - 1 < static_cast<int>(reds.size())) {
+                const auto& prev_red = reds[K_lock - 1];
+                int32_t expected_tok = prev_red.top_token;
+                bool tok_matched = false;
+                int32_t chosen_tok = -1;
+
+                if (expected_tok >= 0) {
+                    if (wave_w1[K_lock] >= 1.0f) {
+                        if (wave_tok1[K_lock] == expected_tok) {
+                            tok_matched = true;
+                            chosen_tok = expected_tok;
+                        }
+                    } else {
+                        // Superposition slot: verified if base model preferred either candidate
+                        if (wave_tok1[K_lock] == expected_tok) {
+                            tok_matched = true;
+                            chosen_tok = wave_tok1[K_lock];
+                        } else if (wave_tok2[K_lock] == expected_tok) {
+                            tok_matched = true;
+                            chosen_tok = wave_tok2[K_lock];
+                        }
+                    }
+                }
+
+                if (tok_matched && !tokenizer_.is_eog(wave_tok1[K_lock - 1])) {
+                    int verified_pos = q0 + K_lock;
+                    canvas[verified_pos].tok1 = chosen_tok;
+                    canvas[verified_pos].tok2 = prev_red.second_token;
+                    canvas[verified_pos].p1   = prev_red.top_prob;
+                    canvas[verified_pos].p2   = prev_red.second_prob;
+                    canvas[verified_pos].entropy = prev_red.entropy_estimate;
+                    wave_tok1[K_lock] = chosen_tok;
+                    K_lock++;
+                } else {
+                    break;
+                }
+            }
+
+            // Update LLM transition tables only from base-model verified prefix
+            for (int r = 0; r < K_lock && r < static_cast<int>(reds.size()); ++r) {
                 int pos = q0 + r;
                 int32_t prev2 = (r >= 2) ? wave_tok1[r - 2] : get_tok_at(pos - 2);
                 int32_t prev1 = (r >= 1) ? wave_tok1[r - 1] : get_tok_at(pos - 1);
@@ -574,27 +632,12 @@ GenResult SchedulerDiffusion::run(
                 canvas[pos].passes++;
             }
 
-            // 5. S1 Hysteresis Energy Soft-Locking & Revision Detection
-            std::vector<TokenDiff> step_diffs;
-            int K_lock = 1; // Slot q0 is always fed with exact discrete token (wave_w1[0] == 1.0f)
-            while (K_lock < W && K_lock - 1 < static_cast<int>(reds.size())) {
-                int32_t expected_tok = reds[K_lock - 1].top_token;
-                if (expected_tok >= 0 &&
-                    wave_w1[K_lock] == 1.0f &&
-                    wave_tok1[K_lock] == expected_tok &&
-                    !tokenizer_.is_eog(wave_tok1[K_lock - 1])) {
-                    K_lock++;
-                } else {
-                    break;
-                }
-            }
-
             // Bidirectional Continuation Energy Check on the tip of the wave:
             // If an ambiguous slot u = q0 + K_lock - 1 led into a high-entropy continuation collapse,
             // wake u and revise it in-place to its runner-up tok2!
             int tip_r = K_lock - 1;
             int tip_pos = q0 + tip_r;
-            bool can_back_revise = (!is_hybrid_recr && K_lock >= 1) || (is_hybrid_recr && K_lock >= 2);
+            bool can_back_revise = !pure_greedy && ((!is_hybrid_recr && K_lock >= 1) || (is_hybrid_recr && K_lock >= 2));
             if (can_back_revise &&
                 tip_r < static_cast<int>(reds.size()) &&
                 canvas[tip_pos].passes == 1 &&
@@ -674,49 +717,59 @@ GenResult SchedulerDiffusion::run(
 
             // Update horizon & downstream active slots from rows [actual_locked - 1 .. W - 1]
             if (!should_stop && actual_locked > 0) {
-                for (int r = actual_locked - 1; r < W && r < static_cast<int>(reds.size()); ++r) {
-                    int target_pos = q0 + r + 1;
-                    if (target_pos >= n_predict) break;
+                int frontier_r = actual_locked - 1;
+                int frontier_pos = q0 + actual_locked;
+                if (frontier_r < static_cast<int>(reds.size()) && frontier_pos < n_predict) {
+                    const auto& red = reds[frontier_r];
+                    if (red.top_token >= 0) {
+                        int32_t old_tok = canvas[frontier_pos].tok1;
+                        if (old_tok >= 0 && old_tok != red.top_token && canvas[frontier_pos].passes > 0) {
+                            TokenDiff diff;
+                            diff.pos = frontier_pos;
+                            diff.old_id = old_tok;
+                            diff.new_id = red.top_token;
+                            diff.old_text = tokenizer_.piece(old_tok);
+                            diff.new_text = tokenizer_.piece(red.top_token);
+                            diff.confidence = red.top_prob;
+                            step_diffs.push_back(std::move(diff));
 
-                    const auto& red = reds[r];
-                    if (red.top_token < 0) continue;
-
-                    bool is_exact_frontier = (r == actual_locked - 1);
-                    int32_t old_tok = canvas[target_pos].tok1;
-
-                    // Emit TokenDiff and Distance-Damped Energy Ripple on revision
-                    if (old_tok >= 0 && old_tok != red.top_token && canvas[target_pos].passes > 0) {
-                        TokenDiff diff;
-                        diff.pos = target_pos;
-                        diff.old_id = old_tok;
-                        diff.new_id = red.top_token;
-                        diff.old_text = tokenizer_.piece(old_tok);
-                        diff.new_text = tokenizer_.piece(red.top_token);
-                        diff.confidence = red.top_prob;
-                        step_diffs.push_back(std::move(diff));
-
-                        float delta_e = std::fabs(red.top_prob - canvas[target_pos].p1) + 0.35f;
-                        int ripple_end = std::min(n_predict, target_pos + 16);
-                        for (int u = target_pos + 1; u < ripple_end; ++u) {
-                            if (canvas[u].state != SlotState::MASKED) {
-                                float damp = std::exp(-RIPPLE_LAMBDA * delta_e / static_cast<float>(u - target_pos));
-                                canvas[u].energy *= damp;
-                                if (canvas[u].state == SlotState::SOFT_LOCKED && canvas[u].energy < THETA_WAKE) {
-                                    canvas[u].state = SlotState::ACTIVE;
-                                    canvas[u].in_kv = false;
+                            float delta_e = std::fabs(red.top_prob - canvas[frontier_pos].p1) + 0.35f;
+                            int ripple_end = std::min(n_predict, frontier_pos + 16);
+                            for (int u = frontier_pos + 1; u < ripple_end; ++u) {
+                                if (canvas[u].state != SlotState::MASKED) {
+                                    float damp = std::exp(-RIPPLE_LAMBDA * delta_e / static_cast<float>(u - frontier_pos));
+                                    canvas[u].energy *= damp;
+                                    if (canvas[u].state == SlotState::SOFT_LOCKED && canvas[u].energy < THETA_WAKE) {
+                                        canvas[u].state = SlotState::ACTIVE;
+                                        canvas[u].in_kv = false;
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if (is_exact_frontier || canvas[target_pos].state != SlotState::SOFT_LOCKED) {
-                        float scale = is_exact_frontier ? 1.0f : 0.85f;
+                        canvas[frontier_pos].tok1 = red.top_token;
+                        canvas[frontier_pos].tok2 = red.second_token;
+                        canvas[frontier_pos].p1 = red.top_prob;
+                        canvas[frontier_pos].p2 = red.second_prob;
+                        canvas[frontier_pos].entropy = red.entropy_estimate;
+                        canvas[frontier_pos].energy = red.top_prob;
+                        canvas[frontier_pos].state = SlotState::ACTIVE;
+                        canvas[frontier_pos].in_kv = false;
+                    }
+                }
+
+                // Propagate downstream model predictions onto canvas for subsequent passes
+                for (int r = actual_locked; r < W && r < static_cast<int>(reds.size()); ++r) {
+                    int target_pos = q0 + r + 1;
+                    if (target_pos >= n_predict) break;
+                    const auto& red = reds[r];
+                    if (red.top_token >= 0 && !tokenizer_.is_eog(red.top_token)) {
                         canvas[target_pos].tok1 = red.top_token;
                         canvas[target_pos].tok2 = red.second_token;
-                        canvas[target_pos].p1 = red.top_prob * scale;
-                        canvas[target_pos].p2 = red.second_prob * scale;
+                        canvas[target_pos].p1 = red.top_prob * 0.50f;
+                        canvas[target_pos].p2 = red.second_prob * 0.50f;
                         canvas[target_pos].entropy = red.entropy_estimate;
-                        canvas[target_pos].energy = red.top_prob * scale;
+                        canvas[target_pos].energy = canvas[target_pos].p1;
                         canvas[target_pos].state = SlotState::ACTIVE;
                         canvas[target_pos].in_kv = false;
                     }

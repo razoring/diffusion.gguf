@@ -181,7 +181,7 @@ void reduce_logits_cuda(
     if (!d_logits || !d_out_reductions || batch_size == 0 || n_vocab == 0) return;
 
     cudaStream_t stream = static_cast<cudaStream_t>(cuda_stream);
-    constexpr int block_threads = 512;
+    constexpr int block_threads = 1024;
     dim3 grid(static_cast<unsigned int>(batch_size));
     dim3 block(block_threads);
 
@@ -192,23 +192,47 @@ void reduce_logits_cuda(
     );
 }
 
-void reduce_logits_cuda_to_host(const float* d_logits, size_t n_vocab, size_t batch_size, LogitsReduction* h_out, void** d_buf, size_t* d_cap) {
+void reduce_logits_cuda_to_host(const float* d_logits, size_t n_vocab, size_t batch_size, LogitsReduction* h_out, void** d_buf, size_t* d_cap, int device_id) {
     if (!d_logits || !h_out || batch_size == 0 || n_vocab == 0 || !d_buf || !d_cap) return;
+
+    int orig_device = 0;
+    cudaGetDevice(&orig_device);
+    if (device_id >= 0) {
+        cudaSetDevice(device_id);
+    } else {
+        cudaPointerAttributes attr;
+        if (cudaPointerGetAttributes(&attr, d_logits) == cudaSuccess && attr.device >= 0) {
+            cudaSetDevice(attr.device);
+        }
+    }
+
     if (batch_size > *d_cap || !*d_buf) {
         if (*d_buf) cudaFree(*d_buf);
         *d_cap = batch_size > 64 ? batch_size : 64;
         if (cudaMalloc(d_buf, (*d_cap) * sizeof(LogitsReduction)) != cudaSuccess) {
             *d_buf = nullptr;
             *d_cap = 0;
+            cudaSetDevice(orig_device);
             return;
         }
     }
     reduce_logits_cuda(d_logits, n_vocab, batch_size, static_cast<LogitsReduction*>(*d_buf), nullptr);
     cudaMemcpy(h_out, *d_buf, batch_size * sizeof(LogitsReduction), cudaMemcpyDeviceToHost);
+    cudaSetDevice(orig_device);
 }
 
-void reduce_logits_cuda_free(void* d_buf) {
-    if (d_buf) cudaFree(d_buf);
+void reduce_logits_cuda_free(void* d_buf, int device_id) {
+    if (d_buf) {
+        int orig_device = 0;
+        if (device_id >= 0) {
+            cudaGetDevice(&orig_device);
+            cudaSetDevice(device_id);
+        }
+        cudaFree(d_buf);
+        if (device_id >= 0) {
+            cudaSetDevice(orig_device);
+        }
+    }
 }
 
 } // namespace kernels

@@ -464,8 +464,10 @@ llama_context::~llama_context() {
     }
     gf_res_buckets.clear();
 
-    if (!model.hparams.no_alloc) {
-        for (size_t i = 0; i < backend_ptrs.size(); ++i) {
+    if (!model.hparams.no_alloc && sched) {
+        /* shared_galloc moved to sched_reserve */
+
+    for (size_t i = 0; i < backend_ptrs.size(); ++i) {
             ggml_backend_t             backend = backend_ptrs[i];
             ggml_backend_buffer_type_t buft    = backend_buft[i];
 
@@ -574,6 +576,7 @@ void llama_context::sched_reserve() {
 
     gf_res_buckets.clear();
     active_bucket_key = 0;
+    shared_galloc = nullptr;
 
     gf_res_prev.reset(new llm_graph_result(max_nodes));
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
@@ -651,8 +654,9 @@ void llama_context::sched_reserve() {
     for (size_t i = 0; i < backend_ptrs.size(); ++i) {
         ggml_backend_t             backend = backend_ptrs[i];
         ggml_backend_buffer_type_t buft    = backend_buft[i];
-        if (!model.hparams.no_alloc) {
+        if (!model.hparams.no_alloc && sched) {
             backend_buf_exp_size[i] = ggml_backend_sched_get_buffer_size(sched.get(), backend);
+            shared_galloc = ggml_backend_sched_get_gallocr(sched.get());
         }
         if (backend_buf_exp_size[i] > 1) {
             LLAMA_LOG_INFO("%s: %10s compute buffer size = %8.2f MiB\n", __func__,
@@ -1307,7 +1311,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     const uint64_t bucket_key = (ubatch.n_tokens <= 32)
-        ? ((uint64_t(ubatch.n_tokens) << 32) | uint64_t(n_outputs) | (sampling.samplers.empty() ? 0ULL : (1ULL << 63)))
+        ? ((uint64_t(ubatch.n_tokens) << 32) | uint64_t(n_outputs) | ((ubatch.token && ubatch.embd) ? (1ULL << 48) : 0ULL) | (sampling.samplers.empty() ? 0ULL : (1ULL << 63)))
         : 0ULL;
 
     if (false && bucket_key != active_bucket_key) {
@@ -2350,7 +2354,7 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         model.arch == LLM_ARCH_QWEN35 ||
         model.arch == LLM_ARCH_QWEN35MOE ||
         model.arch == LLM_ARCH_DEEPSEEK4) {
-        return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
+        return std::max<uint32_t>(n_tokens * 40, 8u * model.n_tensors() + 2048u);
     }
     uint32_t res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
     for (const auto & lora : model.loras) {
@@ -3687,6 +3691,10 @@ void llama_synchronize(llama_context * ctx) {
 
 const float * llama_get_logits_device_ptr(llama_context * ctx) {
     return ctx ? ctx->get_logits_device_ptr() : nullptr;
+}
+
+int32_t llama_get_logits_device_id(llama_context * ctx) {
+    return ctx ? ctx->get_logits_device_id() : -1;
 }
 
 void llama_set_skip_host_logits_copy(llama_context * ctx, bool skip) {

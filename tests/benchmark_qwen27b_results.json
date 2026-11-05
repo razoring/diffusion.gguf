@@ -1,0 +1,22 @@
+{
+  "model": "C:\\Users\\conta\\OneDrive\\Documents\\Personal\\Projects\\Coding\\diffusion.gguf\\models\\Qwen3.8-27B-UD-Q4_K_M.gguf",
+  "ctx": 16000,
+  "max_predict": 4096,
+  "stages": {
+    "raw_decode": {
+      "llama.cpp": {
+        "tokens": 4096,
+        "tok_per_s": 10.9,
+        "time_s": 401.06230420000793,
+        "raw_output": "ata, data science, cloud, Hadoop/Spark, databases, NoSQL.\n- ethics: bias, privacy, surveillance, autonomous weapons, AI regulation.\n\n## 10. Modern computing: cloud, mobile, and ubiquitous systems (2000s-present)\n- cloud computing: AWS 2006, SaaS, PaaS, IaaS, microservices, containers, Kubernetes.\n- mobile: smartphones, app stores, sensors, GPS, 4G/5G.\n- social platforms, recommendation systems, digital economy.\n- cybersecurity: malware,\n\n[ Prompt: 75.8 t/s | Generation: 10.9 t/s ]\n\n\nExiting...\n\n"
+      },
+      "diffusion.gguf": {
+        "tokens": 1914,
+        "tok_per_s": 11.9786,
+        "time_s": 182.5209329000063,
+        "speedup_vs_llama": 1.099,
+        "raw_output": "  CUDA_Host compute buffer size =    73.07 MiB\nsched_reserve: graph nodes  = 4183 (with bs=512), 3607 (with bs=1)\nsched_reserve: graph splits = 2\nsched_reserve: reserve took 20.86 ms, sched copies = 4\n{\n  \"tokens\": 1914,\n  \"iterations\": 1471,\n  \"tokens_per_iteration\": 1.30116,\n  \"tokens_per_second\": 11.9786,\n  \"cumulative_active_work\": 5033,\n  \"total_diffusion_passes\": 1471,\n  \"avg_active_tokens_per_pass\": 3.42148,\n  \"total_blocks\": 1471,\n  \"avg_passes_per_block\": 1,\n  \"total_time_ms\": 159786\n}\n"
+      }
+    }
+  }
+}

@@ -28,8 +28,8 @@ void reduce_logits_cpu(
 );
 
 #if defined(GGML_USE_CUDA) || defined(DIFFUSION_USE_CUDA)
-void reduce_logits_cuda_to_host(const float* d_logits, size_t n_vocab, size_t batch_size, LogitsReduction* h_out, void** d_buf, size_t* d_cap);
-void reduce_logits_cuda_free(void* d_buf);
+void reduce_logits_cuda_to_host(const float* d_logits, size_t n_vocab, size_t batch_size, LogitsReduction* h_out, void** d_buf, size_t* d_cap, int device_id = -1);
+void reduce_logits_cuda_free(void* d_buf, int device_id = -1);
 void reduce_logits_cuda(
     const float* d_logits,
     size_t n_vocab,

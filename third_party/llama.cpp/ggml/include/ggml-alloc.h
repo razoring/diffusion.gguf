@@ -47,6 +47,7 @@ typedef struct ggml_gallocr * ggml_gallocr_t;
 
 GGML_API ggml_gallocr_t ggml_gallocr_new(ggml_backend_buffer_type_t buft);
 GGML_API ggml_gallocr_t ggml_gallocr_new_n(ggml_backend_buffer_type_t * bufts, int n_bufs);
+GGML_API ggml_gallocr_t ggml_gallocr_new_n_shared(ggml_backend_buffer_type_t * bufts, int n_bufs, ggml_gallocr_t shared_galloc);
 GGML_API void           ggml_gallocr_free(ggml_gallocr_t galloc);
 
 // pre-allocate buffers from a measure graph - does not allocate or modify the graph

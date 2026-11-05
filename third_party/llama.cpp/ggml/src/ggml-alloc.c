@@ -483,6 +483,7 @@ struct ggml_gallocr {
     struct vbuffer ** buffers; // [n_buffers]
     struct ggml_dyn_tallocr ** buf_tallocs; // [n_buffers]
     int n_buffers;
+    bool owns_buffers;
 
     struct ggml_hash_set hash_set;
     struct hash_node * hash_values; // [hash_set.size]
@@ -526,7 +527,19 @@ ggml_gallocr_t ggml_gallocr_new_n(ggml_backend_buffer_type_t * bufts, int n_bufs
         }
     }
     galloc->n_buffers = n_bufs;
+    galloc->owns_buffers = true;
 
+    return galloc;
+}
+
+ggml_gallocr_t ggml_gallocr_new_n_shared(ggml_backend_buffer_type_t * bufts, int n_bufs, ggml_gallocr_t shared_galloc) {
+    ggml_gallocr_t galloc = ggml_gallocr_new_n(bufts, n_bufs);
+    if (shared_galloc != NULL && shared_galloc->n_buffers == n_bufs) {
+        for (int i = 0; i < n_bufs; i++) {
+            galloc->buffers[i] = shared_galloc->buffers[i];
+        }
+        galloc->owns_buffers = false;
+    }
     return galloc;
 }
 
@@ -540,7 +553,7 @@ void ggml_gallocr_free(ggml_gallocr_t galloc) {
     }
 
     for (int i = 0; i < galloc->n_buffers; i++) {
-        if (galloc->buffers != NULL) {
+        if (galloc->buffers != NULL && galloc->owns_buffers) {
             // skip if already freed
             bool freed = false;
             for (int j = 0; j < i; j++) {
@@ -921,7 +934,7 @@ static bool ggml_gallocr_reserve_n_impl(
                 realloc = true;
             }
         }
-        if (realloc) {
+        if (realloc && (galloc->owns_buffers || galloc->buffers[i] == NULL)) {
 #ifndef NDEBUG
             {
                 size_t cur_size = galloc->buffers[i] ? ggml_vbuffer_size(galloc->buffers[i]) : 0;

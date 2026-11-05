@@ -172,6 +172,7 @@ public:
     ggml_tensor * get_s_l(int32_t il) const;
 
     int32_t s_copy(int i) const;
+    int32_t s_copy_peek(int i) const;
 
 private:
     const llama_memory_status status;

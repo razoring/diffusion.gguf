@@ -113,6 +113,9 @@ void auto_tune_system(
 
         if (sys.gpu_count > 1 && backend.n_gpu_layers > 0 && primary_vram < est_total_needed) {
             backend.split_mode = 1; // LLAMA_SPLIT_MODE_LAYER across GPUs
+            if (sys.gpu_count == 2 && backend.tensor_split_str.empty()) {
+                backend.tensor_split_str = "56,44";
+            }
         } else {
             backend.split_mode = 0; // LLAMA_SPLIT_MODE_NONE (keep on primary GPU to avoid PCIe transfer overhead)
         }

@@ -315,6 +315,9 @@ extern "C" {
 
     // Initialize a backend scheduler, backends with low index are given priority over backends with high index
     GGML_API ggml_backend_sched_t ggml_backend_sched_new(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload);
+    GGML_API ggml_backend_sched_t ggml_backend_sched_new_shared_galloc(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload, struct ggml_gallocr * shared_galloc);
+    GGML_API struct ggml_gallocr * ggml_backend_sched_get_gallocr(ggml_backend_sched_t sched);
+    GGML_API bool                 ggml_backend_sched_owns_galloc(ggml_backend_sched_t sched);
     GGML_API void                 ggml_backend_sched_free(ggml_backend_sched_t sched);
 
     // Initialize backend buffers from a measure graph

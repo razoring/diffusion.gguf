@@ -1622,6 +1622,7 @@ struct ggml_context * ggml_init(struct ggml_init_params params) {
         /*.objects_end        =*/ NULL,
     };
 
+    if (ctx->mem_buffer == NULL) fprintf(stderr, "[!] ggml_init failed: mem_size=%zu, params.mem_buffer=%p\n", mem_size, params.mem_buffer);
     GGML_ASSERT(ctx->mem_buffer != NULL);
 
     GGML_ASSERT_ALIGNED(ctx->mem_buffer);

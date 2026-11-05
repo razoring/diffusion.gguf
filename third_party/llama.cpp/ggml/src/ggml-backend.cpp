@@ -780,6 +780,7 @@ struct ggml_backend_sched {
     ggml_backend_t backends[GGML_SCHED_MAX_BACKENDS];
     ggml_backend_buffer_type_t bufts[GGML_SCHED_MAX_BACKENDS];
     ggml_gallocr_t galloc;
+    bool owns_galloc;
 
     // hash map of the nodes in the graph
     struct ggml_hash_set  hash_set;
@@ -1724,13 +1725,14 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
     return GGML_STATUS_SUCCESS;
 }
 
-ggml_backend_sched_t ggml_backend_sched_new(
+ggml_backend_sched_t ggml_backend_sched_new_shared_galloc(
         ggml_backend_t * backends,
         ggml_backend_buffer_type_t * bufts,
         int n_backends,
         size_t graph_size,
         bool parallel,
-        bool op_offload) {
+        bool op_offload,
+        ggml_gallocr_t shared_galloc) {
     GGML_ASSERT(n_backends > 0);
     GGML_ASSERT(n_backends <= GGML_SCHED_MAX_BACKENDS);
     GGML_ASSERT(ggml_backend_dev_type(ggml_backend_get_device(backends[n_backends - 1])) == GGML_BACKEND_DEVICE_TYPE_CPU);
@@ -1785,12 +1787,36 @@ ggml_backend_sched_t ggml_backend_sched_new(
         }
     }
 
-    sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
+    if (shared_galloc != NULL) {
+        sched->galloc = ggml_gallocr_new_n_shared(sched->bufts, n_backends, shared_galloc);
+        sched->owns_galloc = true;
+    } else {
+        sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
+        sched->owns_galloc = true;
+    }
     sched->op_offload = op_offload;
 
     ggml_backend_sched_reset(sched);
 
     return sched;
+}
+
+ggml_backend_sched_t ggml_backend_sched_new(
+        ggml_backend_t * backends,
+        ggml_backend_buffer_type_t * bufts,
+        int n_backends,
+        size_t graph_size,
+        bool parallel,
+        bool op_offload) {
+    return ggml_backend_sched_new_shared_galloc(backends, bufts, n_backends, graph_size, parallel, op_offload, NULL);
+}
+
+ggml_gallocr_t ggml_backend_sched_get_gallocr(ggml_backend_sched_t sched) {
+    return sched ? sched->galloc : NULL;
+}
+
+bool ggml_backend_sched_owns_galloc(ggml_backend_sched_t sched) {
+    return sched ? sched->owns_galloc : false;
 }
 
 void ggml_backend_sched_free(ggml_backend_sched_t sched) {
@@ -1802,7 +1828,9 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
             ggml_backend_event_free(sched->events[b][c]);
         }
     }
-    ggml_gallocr_free(sched->galloc);
+    if (sched->owns_galloc) {
+        ggml_gallocr_free(sched->galloc);
+    }
     ggml_free(sched->ctx);
     ggml_hash_set_free(&sched->hash_set);
     free(sched->splits);

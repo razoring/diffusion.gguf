@@ -91,7 +91,8 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;
     const bool is_recr_hybrid = llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
     cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;
-    cparams.n_rs_seq = is_recr_hybrid ? 8 : 0;
+    cparams.n_rs_seq = is_recr_hybrid ? 4 : 0;
+    cparams.n_outputs_max = 64;
     cparams.type_k = parse_ggml_type(config.cache_type_k);
     cparams.type_v = parse_ggml_type(config.cache_type_v);
     bool quant_v = (cparams.type_v != GGML_TYPE_F16 && cparams.type_v != GGML_TYPE_F32);
@@ -144,6 +145,7 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     batch_capacity_ = cparams.n_batch;
     batch_ = llama_batch_init(batch_capacity_, 0, cparams.n_seq_max);
     batch_initialized_ = true;
+
 }
 
 BackendLlama::~BackendLlama() {
@@ -225,10 +227,6 @@ LogitsView BackendLlama::eval(const int32_t* toks, int n, int pos0, bool want_al
                 llama_synchronize(ctx_);
                 return LogitsView{llama_get_logits_device_ptr(ctx_), n_vocab_, 1};
             }
-            if (skip_host_logits_copy_) {
-            llama_synchronize(ctx_);
-            return LogitsView{llama_get_logits_device_ptr(ctx_), n_vocab_, 1};
-        }
         const float* row = llama_get_logits_ith(ctx_, -1);
             if (!row) {
                 throw std::runtime_error("Failed to get logits for last token");
@@ -354,6 +352,11 @@ LogitsView BackendLlama::eval_custom_pos(const int32_t* toks, int n, const int32
 const float* BackendLlama::get_logits_device_ptr() const {
     if (!ctx_) return nullptr;
     return llama_get_logits_device_ptr(ctx_);
+}
+
+int32_t BackendLlama::get_logits_device_id() const {
+    if (!ctx_) return -1;
+    return llama_get_logits_device_id(ctx_);
 }
 
 void BackendLlama::set_skip_host_logits_copy(bool skip) {

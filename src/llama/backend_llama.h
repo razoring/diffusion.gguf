@@ -90,6 +90,7 @@ public:
         int32_t seq_id = 0
     ) override;
     const float* get_logits_device_ptr() const override;
+    int32_t get_logits_device_id() const override;
     void set_skip_host_logits_copy(bool skip) override;
     bool kv_rm_range(int32_t p0, int32_t p1, int32_t seq_id = 0) override;
     const float* get_logits_ith(int32_t i) const override;

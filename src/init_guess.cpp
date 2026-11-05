@@ -32,7 +32,7 @@ uint64_t NgramPool::hash_prefix(const int32_t* toks, int len) const {
 }
 
 void NgramPool::train(const std::vector<int32_t>& tokens) {
-    if (tokens.size() < 2) return;
+    if (tokens.size() < 3) return;
 
     for (size_t i = 0; i < tokens.size(); ++i) {
         for (int order = 2; order <= std::min(8, n_); ++order) {
@@ -61,7 +61,7 @@ int32_t NgramPool::predict(const std::vector<int32_t>& context, int32_t fallback
             const int32_t* ptr = context.data() + (ctx_len - prefix_len);
             uint64_t h = hash_prefix(ptr, prefix_len);
             auto it = table_.find(h);
-            if (it != table_.end() && it->second.best_tok >= 0) {
+            if (it != table_.end() && it->second.best_tok >= 0 && (order >= 3 || it->second.best_count >= 1)) {
                 return it->second.best_tok;
             }
         }
@@ -116,8 +116,15 @@ std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int3
         while (static_cast<int>(guesses.size()) < count) {
             int rem = count - static_cast<int>(guesses.size());
 
-            // 1. Multi-token phrase match from ContextTrie (order >= 2)
-            auto phrase = context_trie_.match_continuation(cur_ctx, rem, 2);
+            // 1. Multi-token phrase match from ContextTrie (order >= 3)
+            int alnum_cnt = 0;
+            for (size_t k = (cur_ctx.size() >= 3 ? cur_ctx.size() - 3 : 0); k < cur_ctx.size(); ++k) {
+                int slen = 0;
+                hash_stem_piece(tokenizer_.piece(cur_ctx[k]), slen);
+                if (slen > 0) alnum_cnt++;
+            }
+            int min_trie_len = (alnum_cnt >= 2) ? 1 : 2;
+            auto phrase = context_trie_.match_continuation(cur_ctx, rem, min_trie_len);
             if (!phrase.empty()) {
                 bool added = false;
                 for (int32_t tok : phrase) {
@@ -130,31 +137,27 @@ std::vector<int32_t> InitGuesser::make_guesses(int count, const std::vector<int3
                 if (added) continue;
             }
 
-            // 2. Highest-frequency N-gram continuation (including 1-token bigrams)
-            int32_t pred = ngram_pool_.predict(cur_ctx, -1);
-            if (pred >= 0 && !tokenizer_.is_eog(pred) && pred != cur_ctx.back()) {
-                guesses.push_back(pred);
-                cur_ctx.push_back(pred);
-                continue;
-            }
-
-            // 3. Single-token most-recent ContextTrie continuation (order == 1)
-            auto single_match = context_trie_.match_continuation(cur_ctx, 1, 1);
-            if (!single_match.empty() && !tokenizer_.is_eog(single_match[0]) && single_match[0] != cur_ctx.back()) {
-                guesses.push_back(single_match[0]);
-                cur_ctx.push_back(single_match[0]);
-                continue;
-            }
-
-            // 4. Subword stem matching fallback
-            int stem_len = 0;
-            uint64_t sh = hash_stem_piece(tokenizer_.piece(cur_ctx.back()), stem_len);
-            if (stem_len >= 3) {
-                auto s_it = stem_next_.find(sh);
-                if (s_it != stem_next_.end() && s_it->second >= 0 && !tokenizer_.is_eog(s_it->second) && s_it->second != cur_ctx.back()) {
-                    guesses.push_back(s_it->second);
-                    cur_ctx.push_back(s_it->second);
+            // 2. Highest-frequency N-gram continuation (order >= 3)
+            if (cur_ctx.size() >= 1) {
+                int32_t pred = ngram_pool_.predict(cur_ctx, -1);
+                if (pred >= 0 && !tokenizer_.is_eog(pred) && pred != cur_ctx.back()) {
+                    guesses.push_back(pred);
+                    cur_ctx.push_back(pred);
                     continue;
+                }
+            }
+
+            // 3. Stem continuation match (only for first lookahead slot)
+            if (guesses.empty()) {
+                int stem_len = 0;
+                uint64_t sh = hash_stem_piece(tokenizer_.piece(cur_ctx.back()), stem_len);
+                if (stem_len >= 5) {
+                    auto it = stem_next_.find(sh);
+                    if (it != stem_next_.end() && it->second >= 0 && !tokenizer_.is_eog(it->second) && it->second != cur_ctx.back()) {
+                        guesses.push_back(it->second);
+                        cur_ctx.push_back(it->second);
+                        continue;
+                    }
                 }
             }
 

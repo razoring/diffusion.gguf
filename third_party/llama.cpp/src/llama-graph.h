@@ -283,6 +283,8 @@ public:
     // used in view offsets, need to match for valid graph reuse
     uint32_t head;
     int32_t rs_z;
+    bool is_direct = false;
+    int32_t rs_src = 0;
 };
 
 class llm_graph_input_cross_embd : public llm_graph_input_i {
