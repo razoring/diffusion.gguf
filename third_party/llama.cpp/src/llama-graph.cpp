@@ -64,14 +64,14 @@ static bool can_reuse_kq_mask(
 // impl
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
-    if (ubatch->token) {
+    if (ubatch->token && tokens) {
         const int64_t n_tokens = ubatch->n_tokens;
 
         ggml_backend_tensor_set(tokens, ubatch->token, 0, n_tokens*ggml_element_size(tokens));
         if (ubatch->embd && tokens_2) {
-            std::vector<int32_t> v_t2(n_tokens), v_tm(n_tokens);
-            std::vector<float>   v_w1(n_tokens), v_w2(n_tokens), v_wm(n_tokens);
-            for (int64_t i = 0; i < n_tokens; ++i) {
+            int32_t v_t2[64], v_tm[64];
+            float   v_w1[64], v_w2[64], v_wm[64];
+            for (int64_t i = 0; i < n_tokens && i < 64; ++i) {
                 const float * row = ubatch->embd + i * n_embd;
                 v_t2[i] = (int32_t) row[0];
                 v_tm[i] = (int32_t) row[1];
@@ -79,16 +79,16 @@ void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
                 v_w2[i] = row[3];
                 v_wm[i] = row[4];
             }
-            ggml_backend_tensor_set(tokens_2,  v_t2.data(), 0, n_tokens * sizeof(int32_t));
-            ggml_backend_tensor_set(tokens_m,  v_tm.data(), 0, n_tokens * sizeof(int32_t));
-            ggml_backend_tensor_set(weights_1, v_w1.data(), 0, n_tokens * sizeof(float));
-            ggml_backend_tensor_set(weights_2, v_w2.data(), 0, n_tokens * sizeof(float));
-            ggml_backend_tensor_set(weights_m, v_wm.data(), 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(tokens_2,  v_t2, 0, n_tokens * sizeof(int32_t));
+            ggml_backend_tensor_set(tokens_m,  v_tm, 0, n_tokens * sizeof(int32_t));
+            ggml_backend_tensor_set(weights_1, v_w1, 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(weights_2, v_w2, 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(weights_m, v_wm, 0, n_tokens * sizeof(float));
             return;
         }
     }
 
-    if (ubatch->embd) {
+    if (ubatch->embd && embd) {
         GGML_ASSERT(n_embd == embd->ne[0]);
 
         const int64_t n_tokens = ubatch->n_tokens;
@@ -100,9 +100,17 @@ void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
 bool llm_graph_input_embd::can_reuse(const llm_graph_params & params) {
     bool res = true;
 
-    res &= (!params.ubatch.token) || (tokens && tokens->ne[0] == params.ubatch.n_tokens);
-    res &= (!params.ubatch.embd)  || (embd   &&   embd->ne[1] == params.ubatch.n_tokens);
-    res &= ((params.ubatch.token != nullptr && params.ubatch.embd != nullptr) == (tokens_2 != nullptr));
+    if (tokens) {
+        res &= (params.ubatch.token != nullptr) && (tokens->ne[0] == params.ubatch.n_tokens);
+    }
+    if (embd) {
+        res &= (embd->ne[1] == params.ubatch.n_tokens);
+    }
+    if (tokens_2) {
+        res &= (params.ubatch.token != nullptr) && (params.ubatch.embd != nullptr);
+    } else {
+        res &= (params.ubatch.embd == nullptr);
+    }
 
     return res;
 }
@@ -110,12 +118,12 @@ bool llm_graph_input_embd::can_reuse(const llm_graph_params & params) {
 void llm_graph_input_embd_h::set_input(const llama_ubatch * ubatch) {
     const int64_t n_tokens = ubatch->n_tokens;
 
-    if (ubatch->token) {
+    if (ubatch->token && tokens) {
         ggml_backend_tensor_set(tokens, ubatch->token, 0, n_tokens*ggml_element_size(tokens));
         if (ubatch->embd && tokens_2) {
-            std::vector<int32_t> v_t2(n_tokens), v_tm(n_tokens);
-            std::vector<float>   v_w1(n_tokens), v_w2(n_tokens), v_wm(n_tokens);
-            for (int64_t i = 0; i < n_tokens; ++i) {
+            int32_t v_t2[64], v_tm[64];
+            float   v_w1[64], v_w2[64], v_wm[64];
+            for (int64_t i = 0; i < n_tokens && i < 64; ++i) {
                 const float * row = ubatch->embd + i * n_embd;
                 v_t2[i] = (int32_t) row[0];
                 v_tm[i] = (int32_t) row[1];
@@ -123,16 +131,15 @@ void llm_graph_input_embd_h::set_input(const llama_ubatch * ubatch) {
                 v_w2[i] = row[3];
                 v_wm[i] = row[4];
             }
-            ggml_backend_tensor_set(tokens_2,  v_t2.data(), 0, n_tokens * sizeof(int32_t));
-            ggml_backend_tensor_set(tokens_m,  v_tm.data(), 0, n_tokens * sizeof(int32_t));
-            ggml_backend_tensor_set(weights_1, v_w1.data(), 0, n_tokens * sizeof(float));
-            ggml_backend_tensor_set(weights_2, v_w2.data(), 0, n_tokens * sizeof(float));
-            ggml_backend_tensor_set(weights_m, v_wm.data(), 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(tokens_2,  v_t2, 0, n_tokens * sizeof(int32_t));
+            ggml_backend_tensor_set(tokens_m,  v_tm, 0, n_tokens * sizeof(int32_t));
+            ggml_backend_tensor_set(weights_1, v_w1, 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(weights_2, v_w2, 0, n_tokens * sizeof(float));
+            ggml_backend_tensor_set(weights_m, v_wm, 0, n_tokens * sizeof(float));
             return;
         }
-    } else {
+    } else if (ubatch->embd && embd) {
         // note: mtmd embedding input goes through here
-        GGML_ASSERT(ubatch->embd);
         GGML_ASSERT(n_embd == embd->ne[0]);
 
         ggml_backend_tensor_set(embd, ubatch->embd, 0, n_tokens*n_embd*ggml_element_size(h));
@@ -388,7 +395,7 @@ bool llm_graph_input_rs::can_reuse(const llm_graph_params & params) {
     bool res = true;
 
     const bool cur_direct = mctx->get_rs_z() < 0 && params.ubatch.n_seqs == 1 && mctx->get_n_rs() == 1 &&
-                            true;
+                            (params.cparams.n_rs_seq == 0);
     res &= (is_direct == cur_direct) && (!cur_direct || rs_src == mctx->s_copy_peek(0));
     if (!cur_direct) {
         res &= s_copy && s_copy->ne[0] == mctx->get_n_rs();
@@ -1044,7 +1051,7 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
 
     const auto * recr_ctx = mctx->get_recr();
     const bool cur_direct = recr_ctx->get_rs_z() < 0 && params.ubatch.n_seqs == 1 && recr_ctx->get_n_rs() == 1 &&
-                            true;
+                            (params.cparams.n_rs_seq == 0);
     res &= (inp_rs->is_direct == cur_direct) && (!cur_direct || inp_rs->rs_src == recr_ctx->s_copy_peek(0));
     if (!cur_direct) {
         res &= inp_rs->s_copy && inp_rs->s_copy->ne[0] == recr_ctx->get_n_rs();
@@ -1096,7 +1103,7 @@ bool llm_graph_input_mem_hybrid_k::can_reuse(const llm_graph_params & params) {
 
     const auto * recr_ctx = mctx->get_recr();
     const bool cur_direct = recr_ctx->get_rs_z() < 0 && params.ubatch.n_seqs == 1 && recr_ctx->get_n_rs() == 1 &&
-                            true;
+                            (params.cparams.n_rs_seq == 0);
     res &= (inp_rs->is_direct == cur_direct) && (!cur_direct || inp_rs->rs_src == recr_ctx->s_copy_peek(0));
     if (!cur_direct) {
         res &= inp_rs->s_copy && inp_rs->s_copy->ne[0] == recr_ctx->get_n_rs();
@@ -1193,7 +1200,7 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
 
     const auto * recr_ctx = mctx->get_recr();
     const bool cur_direct = recr_ctx->get_rs_z() < 0 && params.ubatch.n_seqs == 1 && recr_ctx->get_n_rs() == 1 &&
-                            true;
+                            (params.cparams.n_rs_seq == 0);
     res &= (inp_rs->is_direct == cur_direct) && (!cur_direct || inp_rs->rs_src == recr_ctx->s_copy_peek(0));
     if (!cur_direct) {
         res &= inp_rs->s_copy && inp_rs->s_copy->ne[0] == recr_ctx->get_n_rs();
@@ -3236,6 +3243,7 @@ ggml_tensor * llm_graph_context::build_rs(
 static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
            ggml_context * ctx0,
      const llama_ubatch & ubatch,
+     const llama_cparams & cparams,
     const llama_memory_recurrent_context * mctx_cur) {
 
     auto inp = std::make_unique<llm_graph_input_rs>(mctx_cur);
@@ -3244,7 +3252,7 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
     const int64_t n_seqs = ubatch.n_seqs;
 
     const bool is_direct = mctx_cur->get_rs_z() < 0 && n_seqs == 1 && n_rs == 1 &&
-                           true;
+                           (cparams.n_rs_seq == 0);
     inp->is_direct = is_direct;
     inp->rs_src    = is_direct ? mctx_cur->s_copy_peek(0) : 0;
     if (is_direct) {
@@ -3268,7 +3276,7 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
 llm_graph_input_rs * llm_graph_context::build_rs_inp() const {
     const auto * mctx_cur = static_cast<const llama_memory_recurrent_context *>(mctx);
 
-    auto inp = build_rs_inp_impl(ctx0, ubatch, mctx_cur);
+    auto inp = build_rs_inp_impl(ctx0, ubatch, cparams, mctx_cur);
 
     return (llm_graph_input_rs *) res->add_input(std::move(inp));
 }
@@ -3330,7 +3338,7 @@ ggml_tensor * llm_graph_context::build_rwkv_token_shift_store(
 llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {
     const auto * mctx_cur = static_cast<const llama_memory_hybrid_context *>(mctx);
 
-    auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, mctx_cur->get_recr());
+    auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, cparams, mctx_cur->get_recr());
     auto inp_attn = build_attn_inp_kv_impl(ctx0, ubatch, hparams, cparams, mctx_cur->get_attn());
 
     auto inp = std::make_unique<llm_graph_input_mem_hybrid>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_cur);
@@ -3341,7 +3349,7 @@ llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {
 llm_graph_input_mem_hybrid_k * llm_graph_context::build_inp_mem_hybrid_k() const {
     const auto * mctx_cur = static_cast<const llama_memory_hybrid_context *>(mctx);
 
-    auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, mctx_cur->get_recr());
+    auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, cparams, mctx_cur->get_recr());
     auto inp_attn = build_attn_inp_k_impl(ctx0, ubatch, hparams, cparams, mctx_cur->get_attn());
 
     auto inp = std::make_unique<llm_graph_input_mem_hybrid_k>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_cur);
@@ -3352,7 +3360,7 @@ llm_graph_input_mem_hybrid_k * llm_graph_context::build_inp_mem_hybrid_k() const
 llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa() const {
     const auto * mctx_cur = static_cast<const llama_memory_hybrid_iswa_context *>(mctx);
 
-    auto inp_rs = build_rs_inp_impl(ctx0, ubatch, mctx_cur->get_recr());
+    auto inp_rs = build_rs_inp_impl(ctx0, ubatch, cparams, mctx_cur->get_recr());
 
     // build iswa attention input
     const auto * attn_ctx = mctx_cur->get_attn();

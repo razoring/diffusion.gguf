@@ -154,6 +154,8 @@ void auto_tune_system(
     if (!flags.n_ctx) {
         if (train_ctx_len > 0 && train_ctx_len < 4096) {
             backend.n_ctx = train_ctx_len;
+        } else if (model_bytes >= 10ULL * 1024 * 1024 * 1024) {
+            backend.n_ctx = 4096;
         } else if (usable_vram >= (16ULL * 1024 * 1024 * 1024)) {
             backend.n_ctx = 8192;
         } else if (usable_vram >= (8ULL * 1024 * 1024 * 1024)) {
@@ -226,12 +228,20 @@ void auto_tune_system(
                 backend.n_gpu_layers = safe_layers;
                 layers_clamped = true;
             }
+        }
 
-            // Mitigate activation memory spikes for extreme contexts
-            if (!flags.n_ubatch && backend.n_ctx >= 32768) {
+        // Mitigate activation memory spikes and multi-GPU scheduler split inputs
+        if (!flags.n_ubatch) {
+            if (sys.gpu_count > 1 || model_bytes >= 10ULL * 1024 * 1024 * 1024 || n_layer_all >= 48) {
+                backend.n_ubatch = std::min(backend.n_ubatch, 128);
+            } else if (backend.n_ctx >= 32768) {
                 backend.n_ubatch = std::min(backend.n_ubatch, 256);
             }
-            if (!flags.n_batch && backend.n_ctx >= 32768) {
+        }
+        if (!flags.n_batch) {
+            if (sys.gpu_count > 1 || model_bytes >= 10ULL * 1024 * 1024 * 1024 || n_layer_all >= 48) {
+                backend.n_batch = std::min(backend.n_batch, 512);
+            } else if (backend.n_ctx >= 32768) {
                 backend.n_batch = std::min(backend.n_batch, 512);
             }
         }
@@ -262,7 +272,10 @@ void auto_tune_system(
             ? sys.gpu_free_vram_bytes[0] : 1;
         size_t g1 = (sys.gpu_free_vram_bytes.size() > 1 && sys.gpu_free_vram_bytes[1] > 0)
             ? sys.gpu_free_vram_bytes[1] : 1;
-        double ratio0 = static_cast<double>(g0) / (g0 + g1) * 100.0;
+        // Device 1 hosts output lm_head, recurrent snapshot buffers, and device logits reduction.
+        // Reserve 768 MB extra headroom on Device 1 when balancing layer split across dual GPUs.
+        size_t g1_usable = (g1 > 768ULL * 1024 * 1024) ? (g1 - 768ULL * 1024 * 1024) : (g1 / 2);
+        double ratio0 = static_cast<double>(g0) / (g0 + g1_usable) * 100.0;
         double ratio1 = 100.0 - ratio0;
         int r0 = static_cast<int>(std::round(ratio0));
         int r1 = static_cast<int>(std::round(ratio1));

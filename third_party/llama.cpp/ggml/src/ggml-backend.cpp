@@ -754,7 +754,7 @@ static bool ggml_is_view_op(enum ggml_op op) {
 #endif
 
 #ifndef GGML_SCHED_MAX_SPLIT_INPUTS
-#define GGML_SCHED_MAX_SPLIT_INPUTS 30
+#define GGML_SCHED_MAX_SPLIT_INPUTS 64
 #endif
 
 #ifndef GGML_SCHED_MAX_COPIES
@@ -1758,7 +1758,7 @@ ggml_backend_sched_t ggml_backend_sched_new_shared_galloc(
     sched->hv_tensor_backend_ids = (int *) malloc(sched->hash_set.size * sizeof(sched->hv_tensor_backend_ids[0]));
     sched->hv_tensor_copies      = (ggml_tensor **) malloc(sched->hash_set.size * sched->n_backends * sched->n_copies * sizeof(struct ggml_tensor *));
 
-    const size_t ggml_sched_max_splits = graph_size; // at most there is one split for each node in the graph
+    const size_t ggml_sched_max_splits = std::min(graph_size, (size_t) 512); // at most there is one split for each node in the graph
     const size_t nodes_size = graph_size + ggml_sched_max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2;
     sched->node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->node_backend_ids[0]));
     sched->leaf_backend_ids = (int *) calloc(nodes_size, sizeof(sched->leaf_backend_ids[0]));

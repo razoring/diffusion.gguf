@@ -91,6 +91,25 @@ public:
         return LogitsView{buf_.data(), 1000, n_rows};
     }
 
+    LogitsView eval_custom_pos(const int32_t* toks, int n, const int32_t* custom_pos, bool want_all = true, int32_t seq_id = 0) override {
+        (void)toks;
+        (void)seq_id;
+        int n_rows = want_all ? n : 1;
+        buf_.assign(n_rows * 1000, -100.0f);
+        for (int r = 0; r < n_rows; ++r) {
+            int token_pos = custom_pos ? custom_pos[r] : r;
+            int next_target_pos = token_pos + 1;
+            int32_t correct_tok = 0;
+            if (next_target_pos < static_cast<int>(target.size())) {
+                correct_tok = target[next_target_pos];
+            } else {
+                correct_tok = 999;
+            }
+            buf_[r * 1000 + correct_tok] = 100.0f;
+        }
+        return LogitsView{buf_.data(), 1000, n_rows};
+    }
+
     void kv_truncate(int pos, int32_t seq_id = 0) override {
         (void)seq_id;
         last_truncate_pos = pos;
@@ -116,9 +135,8 @@ int main() {
 
     // Test 1: B=1 AR baseline
     {
-        SchedulerDiffusion scheduler(backend, tokenizer, sampler, 1, 1);
+        SchedulerDiffusion scheduler(backend, tokenizer, sampler, 1);
         GenParams params;
-        params.block_size = 1;
         params.n_predict = 10;
         std::vector<int32_t> prompt = {1}; // BOS
 
@@ -132,12 +150,12 @@ int main() {
         std::cout << "  Passed!\n";
     }
 
-    // Test 2: B=8 Discrete Block Diffusion
+    // Test 2: Whole-Canvas Wave Diffusion
     {
         MockSampler sampler2;
-        SchedulerDiffusion scheduler(backend, tokenizer, sampler2, 8, 4);
+        SchedulerDiffusion scheduler(backend, tokenizer, sampler2, 4);
         GenParams params;
-        params.block_size = 8;
+        params.n_predict = 10;
         params.n_predict = 10;
         std::vector<int32_t> prompt = {1}; // BOS
 

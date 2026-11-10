@@ -96,7 +96,7 @@ BackendLlama::BackendLlama(const BackendConfig& config) {
     cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;
     const bool is_recr_hybrid = llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
     cparams.n_seq_max = config.n_seq_max > 0 ? config.n_seq_max : 1;
-    cparams.n_rs_seq = is_recr_hybrid ? 4 : 0;
+    cparams.n_rs_seq = is_recr_hybrid ? 7 : 0;
     cparams.n_outputs_max = 64;
     cparams.type_k = parse_ggml_type(config.cache_type_k);
     cparams.type_v = parse_ggml_type(config.cache_type_v);
